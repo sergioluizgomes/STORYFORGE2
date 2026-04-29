@@ -3,6 +3,7 @@ const Bible = require('../models/Bible');
 const Scene = require('../models/Scene');
 const aiService = require('./aiService');
 const logStore = require('./logStore');
+const { resolveChapterNumberForBeat } = require('./storyStructureService');
 
 function logAutomation(projectId, event, details = {}) {
     console.log(`[PROJECT_AUTOMATION] ${event}`, {
@@ -322,8 +323,30 @@ class AutomationService {
             });
 
             for (const beat of bible.beats) {
+                const chapterNumber = resolveChapterNumberForBeat(bible, beat.id);
+                if (chapterNumber === undefined) {
+                    logAutomation(projectId, 'scene_chapter_number_unresolved', {
+                        beatId: beat.id,
+                        beatTitle: beat.title
+                    });
+                }
+
                 // Checkpoint: skip already-written scenes
                 if (completedBeatIds.has(beat.id)) {
+                    if (chapterNumber !== undefined) {
+                        await Scene.updateOne(
+                            {
+                                projectId,
+                                beatId: beat.id,
+                                $or: [
+                                    { chapterNumber: { $exists: false } },
+                                    { chapterNumber: null }
+                                ]
+                            },
+                            { $set: { chapterNumber } }
+                        );
+                    }
+
                     logAutomation(projectId, 'scene_skipped_already_done', {
                         beatId: beat.id,
                         beatTitle: beat.title
@@ -350,6 +373,7 @@ class AutomationService {
 
                     const scene = new Scene({
                         projectId,
+                        ...(chapterNumber !== undefined ? { chapterNumber } : {}),
                         beatId: beat.id,
                         title: beat.title,
                         content: prose,
@@ -376,6 +400,7 @@ class AutomationService {
                     logAutomation(projectId, 'scene_saved', {
                         beatId: beat.id,
                         beatTitle: beat.title,
+                        ...(chapterNumber !== undefined ? { chapterNumber } : {}),
                         sceneId: scene._id.toString(),
                         wordCount,
                         summaryLength: sceneSummary.length

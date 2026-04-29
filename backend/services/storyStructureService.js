@@ -26,6 +26,13 @@ function findChapterForBeat(bible, beatId) {
   return null;
 }
 
+function resolveChapterNumberForBeat(bible, beatId) {
+  const chapter = findChapterForBeat(bible, beatId);
+  const chapterNumber = Number(chapter?.chapterNumber);
+
+  return Number.isFinite(chapterNumber) ? chapterNumber : undefined;
+}
+
 function toSafeNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
@@ -51,4 +58,5 @@ function allocateBeatWordBudget(chapterTypeConfig, beatsInChapterCount) {
 module.exports = {
   allocateBeatWordBudget,
   findChapterForBeat,
+  resolveChapterNumberForBeat,
 };

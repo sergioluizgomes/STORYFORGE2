@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   allocateBeatWordBudget,
   findChapterForBeat,
+  resolveChapterNumberForBeat,
 } = require('../services/storyStructureService');
 
 test('findChapterForBeat finds a chapter with a numeric beatId', () => {
@@ -35,6 +36,23 @@ test('findChapterForBeat does not break with a chapter without beats', () => {
   const bible = { chapters: [{ title: 'Chapter 1' }] };
 
   assert.equal(findChapterForBeat(bible, 1), null);
+});
+
+test('resolveChapterNumberForBeat returns the chapter number for a beat', () => {
+  const bible = {
+    chapters: [
+      { chapterNumber: 1, beats: [{ id: 10 }] },
+      { chapterNumber: 2, beats: [{ id: 20 }] },
+    ],
+  };
+
+  assert.equal(resolveChapterNumberForBeat(bible, '20'), 2);
+});
+
+test('resolveChapterNumberForBeat returns undefined when no chapter matches', () => {
+  const bible = { chapters: [{ chapterNumber: 1, beats: [{ id: 10 }] }] };
+
+  assert.equal(resolveChapterNumberForBeat(bible, 99), undefined);
 });
 
 test('allocateBeatWordBudget divides a chapter budget across 3 beats', () => {

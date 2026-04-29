@@ -22,3 +22,4 @@ O formato segue uma adaptacao de "Keep a Changelog", com secoes por data e tipo 
 ### Fixed
 
 - Corrigida a importação JSON de projetos para parsear o arquivo antes de criar o payload com idempotencyKey.
+- Cenas geradas agora recebem chapterNumber quando associadas a beats de capítulos.

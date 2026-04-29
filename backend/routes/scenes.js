@@ -5,12 +5,13 @@ const Project = require('../models/Project');
 const Bible = require('../models/Bible');
 const Scene = require('../models/Scene');
 const aiService = require('../services/aiService');
+const { findChapterForBeat, resolveChapterNumberForBeat } = require('../services/storyStructureService');
 
 // GET /api/scenes/project/:projectId
 // Get all scenes for a project
 router.get('/project/:projectId', async (req, res) => {
     try {
-        const scenes = await Scene.find({ projectId: req.params.projectId }).sort({ beatId: 1 });
+        const scenes = await Scene.find({ projectId: req.params.projectId }).sort({ chapterNumber: 1, beatId: 1 });
         res.json(scenes);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch scenes' });
@@ -69,6 +70,12 @@ router.post('/generate', async (req, res) => {
         if (!beat) {
             console.error(`[SCENE GENERATE] ✗ Beat ${beatId} not found in bible.beats or bible.chapters`);
             return res.status(404).json({ error: 'Beat not found in Bible' });
+        }
+
+        const chapter = findChapterForBeat(bible, beatId);
+        const chapterNumber = resolveChapterNumberForBeat(bible, beatId);
+        if (chapterNumber === undefined) {
+            console.log(`[SCENE GENERATE] Chapter number not found for beat ${beatId}; saving scene without chapterNumber`);
         }
 
         // 1.1 Fetch Previous Scene Summaries (Context Chaining — layered)
@@ -143,12 +150,9 @@ router.post('/generate', async (req, res) => {
 
         // 2.2 Find chapter and get editorial analysis if exists
         let editorialAnalysis = "";
-        if (bible.chapters) {
-            const chapter = bible.chapters.find(c => c.beats && c.beats.some(b => String(b.id) === String(beatId)));
-            if (chapter && chapter.analysis) {
-                editorialAnalysis = chapter.analysis;
-                console.log(`[SCENE GENERATE] Found editorial analysis for chapter ${chapter.chapterNumber}`);
-            }
+        if (chapter && chapter.analysis) {
+            editorialAnalysis = chapter.analysis;
+            console.log(`[SCENE GENERATE] Found editorial analysis for chapter ${chapter.chapterNumber}`);
         }
 
         // If 'params' are provided in body, use them. Otherwise, default to Bible data.
@@ -202,6 +206,7 @@ router.post('/generate', async (req, res) => {
         if (!scene) {
             scene = new Scene({
                 projectId,
+                ...(chapterNumber !== undefined ? { chapterNumber } : {}),
                 beatId,
                 title: beat.title,
                 status: 'pending'
@@ -226,6 +231,9 @@ router.post('/generate', async (req, res) => {
         scene.status = 'draft';
         scene.generatedAt = Date.now();
         scene.wordCount = wordCount;
+        if (chapterNumber !== undefined) {
+            scene.chapterNumber = chapterNumber;
+        }
         scene.currentParams = {
             ...(req.body.params || { beat, characters: bible.characters, setting: bible.settings }),
             ...(direction && direction.trim() ? { direction: direction.trim() } : {})
@@ -315,6 +323,7 @@ router.post('/generate-chapter', async (req, res) => {
                 if (!scene) {
                     scene = new Scene({
                         projectId,
+                        chapterNumber: chapter.chapterNumber,
                         beatId: beat.id,
                         title: beat.title,
                         status: 'pending'
@@ -338,6 +347,7 @@ router.post('/generate-chapter', async (req, res) => {
                 scene.status = 'draft';
                 scene.generatedAt = Date.now();
                 scene.wordCount = content.split(/\s+/).filter(Boolean).length;
+                scene.chapterNumber = chapter.chapterNumber;
                 scene.currentParams = {
                     beat: beat,
                     characters: bible.characters,
