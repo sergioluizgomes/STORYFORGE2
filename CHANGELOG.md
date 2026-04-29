@@ -18,3 +18,7 @@ O formato segue uma adaptacao de "Keep a Changelog", com secoes por data e tipo 
 ### Changed
 
 - Script `npm test` do backend agora executa o test runner nativo do Node.js.
+
+### Fixed
+
+- Corrigida a importação JSON de projetos para parsear o arquivo antes de criar o payload com idempotencyKey.

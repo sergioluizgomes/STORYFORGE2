@@ -229,10 +229,7 @@ export default function NewProject() {
         setLoading(true);
         try {
             const requestKey = getImportRequestKey();
-            const importPayload = {
-                ...jsonData,
-                idempotencyKey: requestKey
-            };
+
             // Try to read the file as text - with FileReader fallback
             let fileText;
             try {
@@ -253,15 +250,13 @@ export default function NewProject() {
                     console.log('FileReader success, content length:', fileText.length);
                 } catch (frError) {
                     console.error('FileReader also failed:', frError);
-                    alert('Failed to read the file. Please try selecting it again.');
-                    setLoading(false);
+                    alert('Could not read the selected file. Please try selecting it again.');
                     return;
                 }
             }
 
-            if (!fileText || fileText.length === 0) {
-                alert('The file appears to be empty. Please check the file content.');
-                setLoading(false);
+            if (!fileText || !fileText.trim()) {
+                alert('The selected JSON file is empty. Please choose a file with project data.');
                 return;
             }
             
@@ -272,10 +267,14 @@ export default function NewProject() {
                 console.log('JSON parsed successfully, keys:', Object.keys(jsonData));
             } catch (parseError) {
                 console.error('JSON parse error:', parseError);
-                alert('Invalid JSON file. Please check the file format.');
-                setLoading(false);
+                alert('Invalid JSON file. Please check the file format and try again.');
                 return;
             }
+
+            const importPayload = {
+                ...jsonData,
+                idempotencyKey: requestKey
+            };
 
             // Send as JSON directly
             const response = await axios.post(buildApiUrl('/projects/import'), importPayload, {
@@ -290,7 +289,8 @@ export default function NewProject() {
             navigate(`/project/${project._id}`);
         } catch (error) {
             console.error('Error importing project:', error);
-            alert('Failed to import project: ' + (error.response?.data?.error || error.message));
+            const backendError = error.response?.data?.error || error.response?.data?.message;
+            alert('Failed to import project: ' + (backendError || error.message || 'Unexpected error.'));
         } finally {
             setLoading(false);
         }
