@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   allocateBeatWordBudget,
   findChapterForBeat,
+  groupScenesForManuscript,
   resolveChapterNumberForBeat,
   sortScenesForManuscript,
 } = require('../services/storyStructureService');
@@ -147,4 +148,74 @@ test('sortScenesForManuscript handles numeric and string beatIds predictably', (
   const sorted = sortScenesForManuscript(scenes);
 
   assert.deepEqual(sorted.map((scene) => scene.title), ['Beat 1', 'Beat 2', 'Beat 10']);
+});
+
+test('groupScenesForManuscript groups scenes by chapterNumber', () => {
+  const groups = groupScenesForManuscript([
+    { title: 'Chapter 2', chapterNumber: 2, beatId: 1 },
+    { title: 'Chapter 1', chapterNumber: 1, beatId: 1 },
+  ]);
+
+  assert.deepEqual(groups.map((group) => group.chapterNumber), [1, 2]);
+  assert.deepEqual(groups.map((group) => group.scenes[0].title), ['Chapter 1', 'Chapter 2']);
+});
+
+test('groupScenesForManuscript keeps scenes without chapterNumber in a separate group', () => {
+  const groups = groupScenesForManuscript([
+    { title: 'Chapter 1', chapterNumber: 1, beatId: 1 },
+    { title: 'Loose Scene', beatId: 2 },
+  ]);
+
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].type, 'chapter');
+  assert.equal(groups[0].chapterNumber, 1);
+  assert.equal(groups[1].type, 'unassigned');
+  assert.equal(groups[1].chapterNumber, undefined);
+  assert.deepEqual(groups[1].scenes.map((scene) => scene.title), ['Loose Scene']);
+});
+
+test('groupScenesForManuscript does not transform missing chapterNumber into chapter 1', () => {
+  const groups = groupScenesForManuscript([
+    { title: 'Legacy Scene', beatId: 1 },
+  ]);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].type, 'unassigned');
+  assert.equal(groups[0].chapterNumber, undefined);
+});
+
+test('groupScenesForManuscript does not mutate the original array', () => {
+  const scenes = [
+    { title: 'Second', chapterNumber: 2, beatId: 1 },
+    { title: 'First', chapterNumber: 1, beatId: 1 },
+  ];
+
+  const groups = groupScenesForManuscript(scenes);
+
+  assert.deepEqual(scenes.map((scene) => scene.title), ['Second', 'First']);
+  assert.deepEqual(groups.map((group) => group.scenes[0].title), ['First', 'Second']);
+});
+
+test('groupScenesForManuscript supports short stories and empty scene lists', () => {
+  const shortStoryGroups = groupScenesForManuscript([
+    { title: 'Opening', beatId: 1 },
+    { title: 'Ending', beatId: 2 },
+  ]);
+
+  assert.equal(shortStoryGroups.length, 1);
+  assert.equal(shortStoryGroups[0].type, 'unassigned');
+  assert.deepEqual(shortStoryGroups[0].scenes.map((scene) => scene.title), ['Opening', 'Ending']);
+  assert.deepEqual(groupScenesForManuscript([]), []);
+});
+
+test('groupScenesForManuscript preserves beat order within a chapter', () => {
+  const groups = groupScenesForManuscript([
+    { title: 'Beat 3', chapterNumber: '1', beatId: 3 },
+    { title: 'Beat 1', chapterNumber: 1, beatId: 1 },
+    { title: 'Beat 2', chapterNumber: '1', beatId: '2' },
+  ]);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].chapterNumber, 1);
+  assert.deepEqual(groups[0].scenes.map((scene) => scene.title), ['Beat 1', 'Beat 2', 'Beat 3']);
 });

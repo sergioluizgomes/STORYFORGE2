@@ -79,6 +79,15 @@ function compareOptionalNumbers(a, b) {
   return 0;
 }
 
+function getChapterNumber(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 function compareBeatIds(a, b) {
   if (a === null || a === undefined) {
     return b === null || b === undefined ? 0 : 1;
@@ -136,9 +145,51 @@ function sortScenesForManuscript(scenes) {
   });
 }
 
+function groupScenesForManuscript(scenes) {
+  const orderedScenes = sortScenesForManuscript(Array.isArray(scenes) ? scenes : []);
+  const groups = [];
+  const chapters = new Map();
+  let unassignedGroup = null;
+
+  for (const scene of orderedScenes) {
+    const chapterNumber = getChapterNumber(scene?.chapterNumber);
+
+    if (chapterNumber === null) {
+      if (!unassignedGroup) {
+        unassignedGroup = {
+          type: 'unassigned',
+          title: 'Scenes',
+          scenes: [],
+        };
+        groups.push(unassignedGroup);
+      }
+
+      unassignedGroup.scenes.push(scene);
+      continue;
+    }
+
+    if (!chapters.has(chapterNumber)) {
+      const chapterGroup = {
+        type: 'chapter',
+        chapterNumber,
+        title: `Chapter ${chapterNumber}`,
+        scenes: [],
+      };
+
+      chapters.set(chapterNumber, chapterGroup);
+      groups.push(chapterGroup);
+    }
+
+    chapters.get(chapterNumber).scenes.push(scene);
+  }
+
+  return groups;
+}
+
 module.exports = {
   allocateBeatWordBudget,
   findChapterForBeat,
+  groupScenesForManuscript,
   resolveChapterNumberForBeat,
   sortScenesForManuscript,
 };

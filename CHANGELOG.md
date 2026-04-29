@@ -24,3 +24,4 @@ O formato segue uma adaptacao de "Keep a Changelog", com secoes por data e tipo 
 - Corrigida a importação JSON de projetos para parsear o arquivo antes de criar o payload com idempotencyKey.
 - Cenas geradas agora recebem chapterNumber quando associadas a beats de capítulos.
 - Corrigida a ordenação e os títulos de cenas na exportação DOCX.
+- Corrigido o agrupamento e a ordenação de cenas na exportação EPUB.

@@ -3,6 +3,7 @@ const Project = require('../models/Project');
 const Bible = require('../models/Bible');
 const Scene = require('../models/Scene');
 const HybridBook = require('../models/HybridBook');
+const { groupScenesForManuscript } = require('./storyStructureService');
 
 /**
  * Generates an EPUB file compatible with Amazon KDP
@@ -34,7 +35,9 @@ class EpubService {
         }
 
         const bible = await Bible.findOne({ projectId });
-        const scenes = await Scene.find({ projectId }).sort({ chapterNumber: 1, beatId: 1 });
+        const scenes = await Scene.find({ projectId })
+            .sort({ chapterNumber: 1, beatId: 1, createdAt: 1, generatedAt: 1 })
+            .lean();
         const hybridBook = await HybridBook.findOne({ projectId });
 
         // Prepare metadata
@@ -142,14 +145,16 @@ class EpubService {
             }
         } else {
             // Use scenes organized by chapters
-            const chapterMap = this._organizeScenesByChapter(scenes, bible);
+            const chapterGroups = this._organizeScenesByChapter(scenes, bible);
             
-            for (const [chapterNum, chapterData] of chapterMap.entries()) {
+            for (const chapterData of chapterGroups) {
                 let chapterContent = `<h1 class="chapter-title">${chapterData.title}</h1>\n`;
                 
-                for (const scene of chapterData.scenes) {
-                    if (scene.title) {
-                        chapterContent += `<h2 class="scene-title">${scene.title}</h2>\n`;
+                chapterData.scenes.forEach((scene, index) => {
+                    const sceneTitle = scene.title || scene.beatName || `Scene ${index + 1}`;
+
+                    if (sceneTitle) {
+                        chapterContent += `<h2 class="scene-title">${sceneTitle}</h2>\n`;
                     }
                     
                     if (scene.content) {
@@ -161,7 +166,7 @@ class EpubService {
                             }
                         }
                     }
-                }
+                });
                 
                 content.push({
                     title: chapterData.title,
@@ -177,33 +182,35 @@ class EpubService {
      * Organize scenes by chapter
      */
     _organizeScenesByChapter(scenes, bible) {
-        const chapterMap = new Map();
+        return groupScenesForManuscript(scenes)
+            .map(group => {
+                const scenesWithContent = group.scenes.filter(scene => scene.content);
 
-        for (const scene of scenes) {
-            if (!scene.content) continue;
+                if (group.type === 'unassigned') {
+                    return {
+                        ...group,
+                        title: 'Scenes',
+                        scenes: scenesWithContent
+                    };
+                }
 
-            const chapterNum = scene.chapterNumber || 1;
-            
-            if (!chapterMap.has(chapterNum)) {
-                // Get chapter info from bible if available
+                const chapterNum = group.chapterNumber;
                 let chapterTitle = `Capítulo ${chapterNum}`;
+
                 if (bible && bible.chapters) {
-                    const bibleChapter = bible.chapters.find(c => c.chapterNumber === chapterNum);
+                    const bibleChapter = bible.chapters.find(c => Number(c.chapterNumber) === chapterNum);
                     if (bibleChapter && bibleChapter.title) {
                         chapterTitle = `Capítulo ${chapterNum}: ${bibleChapter.title}`;
                     }
                 }
-                
-                chapterMap.set(chapterNum, {
-                    title: chapterTitle,
-                    scenes: []
-                });
-            }
-            
-            chapterMap.get(chapterNum).scenes.push(scene);
-        }
 
-        return new Map([...chapterMap.entries()].sort((a, b) => a[0] - b[0]));
+                return {
+                    ...group,
+                    title: chapterTitle,
+                    scenes: scenesWithContent
+                };
+            })
+            .filter(group => group.scenes.length > 0);
     }
 
     /**
