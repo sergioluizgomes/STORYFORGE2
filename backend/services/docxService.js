@@ -2,6 +2,7 @@ const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } = re
 const Project = require('../models/Project');
 const Scene = require('../models/Scene');
 const Bible = require('../models/Bible');
+const { sortScenesForManuscript } = require('./storyStructureService');
 
 /**
  * Parse Markdown formatting and convert to TextRun array
@@ -128,15 +129,17 @@ async function generateDocx(projectId, options = {}) {
         });
     }
     
-    // Fetch all scenes and sort by position
+    // Fetch all scenes in a coarse database order, then apply the manuscript order
+    // in memory so legacy scenes with missing fields still get a stable fallback.
     const scenes = await Scene.find({ projectId })
-        .sort({ position: 1 })
+        .sort({ chapterNumber: 1, beatId: 1, createdAt: 1, generatedAt: 1 })
         .lean();
 
     if (!scenes || scenes.length === 0) {
         throw new Error('No scenes found for this project');
     }
 
+    const orderedScenes = sortScenesForManuscript(scenes);
     const sections = [];
 
     // Add cover page
@@ -185,12 +188,13 @@ async function generateDocx(projectId, options = {}) {
 
     // Process scenes
     let currentChapter = null;
-    let currentBeat = null;
+    let currentSceneTitle = null;
 
-    scenes.forEach((scene, index) => {
+    orderedScenes.forEach((scene, index) => {
         // Add chapter heading if changed
         if (scene.chapterNumber && scene.chapterNumber !== currentChapter) {
             currentChapter = scene.chapterNumber;
+            currentSceneTitle = null;
             // Get the chapter title from the bible
             const chapterTitle = chapterTitles[currentChapter] || '';
             
@@ -216,12 +220,14 @@ async function generateDocx(projectId, options = {}) {
             }
         }
 
-        // Add beat heading if changed
-        if (scene.beatName && scene.beatName !== currentBeat) {
-            currentBeat = scene.beatName;
+        const sceneTitle = scene.title || scene.beatName || `Scene ${index + 1}`;
+
+        // Add scene heading if changed
+        if (sceneTitle && sceneTitle !== currentSceneTitle) {
+            currentSceneTitle = sceneTitle;
             sections.push(
                 new Paragraph({
-                    text: scene.beatName,
+                    text: sceneTitle,
                     heading: HeadingLevel.HEADING_2,
                     spacing: { before: 200, after: 200 }
                 })

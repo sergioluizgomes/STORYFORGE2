@@ -5,6 +5,7 @@ const {
   allocateBeatWordBudget,
   findChapterForBeat,
   resolveChapterNumberForBeat,
+  sortScenesForManuscript,
 } = require('../services/storyStructureService');
 
 test('findChapterForBeat finds a chapter with a numeric beatId', () => {
@@ -84,4 +85,66 @@ test('allocateBeatWordBudget does not return NaN', () => {
 
   assert.equal(Number.isNaN(budget.min), false);
   assert.equal(Number.isNaN(budget.max), false);
+});
+
+test('sortScenesForManuscript orders scenes by chapterNumber and beatId', () => {
+  const scenes = [
+    { title: 'Chapter 2 Beat 1', chapterNumber: 2, beatId: 1 },
+    { title: 'Chapter 1 Beat 2', chapterNumber: 1, beatId: 2 },
+    { title: 'Chapter 1 Beat 1', chapterNumber: 1, beatId: 1 },
+  ];
+
+  const sorted = sortScenesForManuscript(scenes);
+
+  assert.deepEqual(sorted.map((scene) => scene.title), [
+    'Chapter 1 Beat 1',
+    'Chapter 1 Beat 2',
+    'Chapter 2 Beat 1',
+  ]);
+});
+
+test('sortScenesForManuscript keeps scenes without chapterNumber exportable', () => {
+  const scenes = [
+    { title: 'Beat 2', beatId: 2 },
+    { title: 'Beat 1', beatId: 1 },
+  ];
+
+  const sorted = sortScenesForManuscript(scenes);
+
+  assert.deepEqual(sorted.map((scene) => scene.title), ['Beat 1', 'Beat 2']);
+});
+
+test('sortScenesForManuscript does not mutate the original array', () => {
+  const scenes = [
+    { title: 'Second', chapterNumber: 2, beatId: 1 },
+    { title: 'First', chapterNumber: 1, beatId: 1 },
+  ];
+
+  const sorted = sortScenesForManuscript(scenes);
+
+  assert.notEqual(sorted, scenes);
+  assert.deepEqual(scenes.map((scene) => scene.title), ['Second', 'First']);
+});
+
+test('sortScenesForManuscript falls back to createdAt', () => {
+  const scenes = [
+    { title: 'Later', beatId: 1, createdAt: '2026-01-02T00:00:00.000Z' },
+    { title: 'Earlier', beatId: 1, createdAt: '2026-01-01T00:00:00.000Z' },
+  ];
+
+  const sorted = sortScenesForManuscript(scenes);
+
+  assert.deepEqual(sorted.map((scene) => scene.title), ['Earlier', 'Later']);
+});
+
+test('sortScenesForManuscript handles numeric and string beatIds predictably', () => {
+  const scenes = [
+    { title: 'Beat 10', chapterNumber: 1, beatId: '10' },
+    { title: 'Beat 2', chapterNumber: 1, beatId: 2 },
+    { title: 'Beat 1', chapterNumber: 1, beatId: '1' },
+  ];
+
+  const sorted = sortScenesForManuscript(scenes);
+
+  assert.deepEqual(sorted.map((scene) => scene.title), ['Beat 1', 'Beat 2', 'Beat 10']);
 });

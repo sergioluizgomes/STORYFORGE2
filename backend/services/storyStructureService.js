@@ -55,8 +55,90 @@ function allocateBeatWordBudget(chapterTypeConfig, beatsInChapterCount) {
   };
 }
 
+function getFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function compareOptionalNumbers(a, b) {
+  const left = getFiniteNumber(a);
+  const right = getFiniteNumber(b);
+
+  if (left !== null && right !== null) {
+    return left - right;
+  }
+
+  if (left !== null) {
+    return -1;
+  }
+
+  if (right !== null) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function compareBeatIds(a, b) {
+  if (a === null || a === undefined) {
+    return b === null || b === undefined ? 0 : 1;
+  }
+
+  if (b === null || b === undefined) {
+    return -1;
+  }
+
+  const numericComparison = compareOptionalNumbers(a, b);
+  if (numericComparison !== 0) {
+    return numericComparison;
+  }
+
+  return String(a).localeCompare(String(b), 'en', { numeric: true });
+}
+
+function getSceneTimestamp(scene) {
+  const timestamp = new Date(scene?.createdAt ?? scene?.generatedAt).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function compareOptionalTimestamps(a, b) {
+  const left = getSceneTimestamp(a);
+  const right = getSceneTimestamp(b);
+
+  if (left !== null && right !== null) {
+    return left - right;
+  }
+
+  if (left !== null) {
+    return -1;
+  }
+
+  if (right !== null) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function sortScenesForManuscript(scenes) {
+  return [...scenes].sort((left, right) => {
+    const chapterComparison = compareOptionalNumbers(left?.chapterNumber, right?.chapterNumber);
+    if (chapterComparison !== 0) {
+      return chapterComparison;
+    }
+
+    const beatComparison = compareBeatIds(left?.beatId, right?.beatId);
+    if (beatComparison !== 0) {
+      return beatComparison;
+    }
+
+    return compareOptionalTimestamps(left, right);
+  });
+}
+
 module.exports = {
   allocateBeatWordBudget,
   findChapterForBeat,
   resolveChapterNumberForBeat,
+  sortScenesForManuscript,
 };
