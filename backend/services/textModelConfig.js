@@ -1,5 +1,6 @@
 const GEMINI_PROVIDER = 'gemini';
 const LM_STUDIO_PROVIDER = 'lm-studio';
+const DEEPSEEK_PROVIDER = 'deepseek';
 
 function normalizeProvider(provider) {
     if (!provider) return null;
@@ -10,6 +11,9 @@ function normalizeProvider(provider) {
     }
     if ([LM_STUDIO_PROVIDER, 'lmstudio', 'lm_studio'].includes(normalized)) {
         return LM_STUDIO_PROVIDER;
+    }
+    if ([DEEPSEEK_PROVIDER, 'deepseek-ai'].includes(normalized)) {
+        return DEEPSEEK_PROVIDER;
     }
 
     return null;
@@ -23,6 +27,8 @@ function getProviderDefaultModel(provider) {
     switch (provider) {
         case LM_STUDIO_PROVIDER:
             return process.env.LM_STUDIO_DEFAULT_MODEL || process.env.TEXT_AI_MODEL || '';
+        case DEEPSEEK_PROVIDER:
+            return process.env.DEEPSEEK_TEXT_MODEL || process.env.DEEPSEEK_DEFAULT_MODEL || 'deepseek-chat';
         case GEMINI_PROVIDER:
         default:
             return process.env.GEMINI_TEXT_MODEL || 'gemini-flash-lite-latest';
@@ -78,6 +84,14 @@ function listTextProviders() {
             configured: true,
             local: true,
             baseUrl: getLmStudioBaseUrl()
+        },
+        {
+            id: DEEPSEEK_PROVIDER,
+            label: 'DeepSeek',
+            description: 'OpenAI-compatible hosted provider for text generation.',
+            defaultModel: getProviderDefaultModel(DEEPSEEK_PROVIDER),
+            configured: Boolean(process.env.DEEPSEEK_API_KEY),
+            local: false
         }
     ];
 }
@@ -85,6 +99,7 @@ function listTextProviders() {
 module.exports = {
     GEMINI_PROVIDER,
     LM_STUDIO_PROVIDER,
+    DEEPSEEK_PROVIDER,
     normalizeProvider,
     getLmStudioBaseUrl,
     getProviderDefaultModel,

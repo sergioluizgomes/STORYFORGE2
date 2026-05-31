@@ -1,6 +1,8 @@
 const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs');
 const path = require('path');
+const { safeErrorForLog } = require('../utils/safeLog');
+const { recordCostEntrySafe } = require('./costLedgerService');
 // const mime = require('mime'); // Removed due to compatibility issues
 
 let ai;
@@ -46,7 +48,7 @@ function saveBinaryFile(fileName, content) {
  * @param {string} aspectRatio
  * @returns {Promise<string>} public url of the generated image
  */
-async function generateCharacterImage(prompt, stylePrompt = "", aspectRatio = '9:16') {
+async function generateCharacterImage(prompt, stylePrompt = "", aspectRatio = '9:16', costMetadata = {}) {
     const config = {
         responseModalities: [
             'IMAGE',
@@ -63,6 +65,7 @@ async function generateCharacterImage(prompt, stylePrompt = "", aspectRatio = '9
 
     const maxAttempts = 3;
     let lastError;
+    const startedAt = Date.now();
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
@@ -73,7 +76,13 @@ async function generateCharacterImage(prompt, stylePrompt = "", aspectRatio = '9
                 }
             ];
 
-            console.log(`Generating image (attempt ${attempt}/${maxAttempts}): ${fullPrompt.substring(0, 100)}...`);
+            console.log(`[IMAGE_AI] generation_started`, {
+                attempt,
+                maxAttempts,
+                model: targetModel,
+                aspectRatio,
+                promptLength: fullPrompt.length
+            });
 
             const response = await getImageClient().models.generateContentStream({
                 model: targetModel,
@@ -111,19 +120,53 @@ async function generateCharacterImage(prompt, stylePrompt = "", aspectRatio = '9
                 throw new Error("No image data received from Gemini.");
             }
 
+            recordCostEntrySafe({
+                projectId: costMetadata.projectId,
+                task: costMetadata.task || 'generate_image',
+                stage: costMetadata.stage || 'image',
+                provider: 'gemini',
+                model: targetModel,
+                requestType: 'image',
+                status: 'success',
+                durationMs: Date.now() - startedAt,
+                metadata: {
+                    source: costMetadata.source || 'imageService.generateCharacterImage',
+                    aspectRatio,
+                    attempt
+                }
+            });
             return savedFilePath;
 
         } catch (error) {
             lastError = error;
             if (attempt < maxAttempts) {
                 const waitMs = Math.pow(2, attempt - 1) * 1500; // 1.5s, 3s
-                console.warn(`Image generation attempt ${attempt} failed: ${error.message}. Retrying in ${waitMs}ms...`);
+                console.warn(`[IMAGE_AI] generation_retry`, {
+                    attempt,
+                    waitMs,
+                    error: safeErrorForLog(error)
+                });
                 await sleep(waitMs);
             }
         }
     }
 
-    console.error("Image Generation Error (all attempts exhausted):", lastError);
+    console.error("Image Generation Error (all attempts exhausted):", safeErrorForLog(lastError));
+    recordCostEntrySafe({
+        projectId: costMetadata.projectId,
+        task: costMetadata.task || 'generate_image',
+        stage: costMetadata.stage || 'image',
+        provider: 'gemini',
+        model: targetModel,
+        requestType: 'image',
+        status: 'error',
+        durationMs: Date.now() - startedAt,
+        metadata: {
+            source: costMetadata.source || 'imageService.generateCharacterImage',
+            aspectRatio
+        },
+        errorSummary: lastError?.message
+    });
     throw lastError;
 }
 
@@ -132,11 +175,11 @@ async function generateCharacterImage(prompt, stylePrompt = "", aspectRatio = '9
  * Use in automation pipelines where image generation is best-effort.
  * @returns {Promise<string|null>}
  */
-async function generateCharacterImageSafe(prompt, stylePrompt = "", aspectRatio = '9:16') {
+async function generateCharacterImageSafe(prompt, stylePrompt = "", aspectRatio = '9:16', costMetadata = {}) {
     try {
-        return await generateCharacterImage(prompt, stylePrompt, aspectRatio);
+        return await generateCharacterImage(prompt, stylePrompt, aspectRatio, costMetadata);
     } catch (error) {
-        console.warn(`[imageService] Image generation skipped after retries: ${error.message}`);
+        console.warn(`[imageService] Image generation skipped after retries`, safeErrorForLog(error));
         return null;
     }
 }

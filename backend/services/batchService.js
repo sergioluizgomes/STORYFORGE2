@@ -4,13 +4,14 @@ const NarrativeStyle = require('../models/NarrativeStyle');
 const ImageStyle = require('../models/ImageStyle');
 const projectService = require('./projectService');
 const automationService = require('./automationService');
+const { redactSensitiveKeys, safeErrorForLog, truncateForLog } = require('../utils/safeLog');
 
 function log(event, details = {}) {
-    console.log(`[BATCH] ${event}`, details);
+    console.log(`[BATCH] ${event}`, redactSensitiveKeys(details));
 }
 
 function logError(event, details = {}) {
-    console.error(`[BATCH] ${event}`, details);
+    console.error(`[BATCH] ${event}`, redactSensitiveKeys(details));
 }
 
 /**
@@ -36,7 +37,7 @@ async function startBatch(items) {
 
     // Fire-and-forget: process sequentially in the background
     processBatch(job._id.toString()).catch(err =>
-        logError('processBatch_unhandled_error', { batchId: job._id.toString(), error: err.message })
+        logError('processBatch_unhandled_error', { batchId: job._id.toString(), error: safeErrorForLog(err) })
     );
 
     return job;
@@ -162,14 +163,14 @@ async function processBatch(batchId) {
                 index: i,
                 name: config.name,
                 projectId: projectId?.toString() || null,
-                error: err.message
+                error: safeErrorForLog(err)
             });
 
             await BatchJob.findByIdAndUpdate(batchId, {
                 $set: {
                     [`items.${i}.status`]: 'failed',
                     [`items.${i}.completedAt`]: new Date(),
-                    [`items.${i}.error`]: err.message
+                    [`items.${i}.error`]: truncateForLog(err.message || String(err))
                 }
             });
         }

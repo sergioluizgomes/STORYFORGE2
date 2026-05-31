@@ -3,22 +3,26 @@ const Bible = require('../models/Bible');
 const Scene = require('../models/Scene');
 const aiService = require('./aiService');
 const logStore = require('./logStore');
+const { getBookBriefByProjectId } = require('./bookBriefService');
 const { resolveChapterNumberForBeat } = require('./storyStructureService');
+const { redactSensitiveKeys, safeErrorForLog, truncateForLog } = require('../utils/safeLog');
 
 function logAutomation(projectId, event, details = {}) {
+    const safeDetails = redactSensitiveKeys(details);
     console.log(`[PROJECT_AUTOMATION] ${event}`, {
         projectId: projectId?.toString?.() || projectId,
-        ...details
+        ...safeDetails
     });
-    logStore.appendLog(projectId, 'info', event, details);
+    logStore.appendLog(projectId, 'info', event, safeDetails);
 }
 
 function logAutomationError(projectId, event, details = {}) {
+    const safeDetails = redactSensitiveKeys(details);
     console.error(`[PROJECT_AUTOMATION] ${event}`, {
         projectId: projectId?.toString?.() || projectId,
-        ...details
+        ...safeDetails
     });
-    logStore.appendLog(projectId, 'error', event, details);
+    logStore.appendLog(projectId, 'error', event, safeDetails);
 }
 
 const activeAutomations = new Set();
@@ -280,7 +284,7 @@ class AutomationService {
                         logAutomationError(projectId, 'beat_enrichment_failed', {
                             beatId: bible.beats[i].id,
                             beatTitle: bible.beats[i].title,
-                            error: err.message
+                            error: safeErrorForLog(err)
                         });
                     }
                 }
@@ -297,6 +301,14 @@ class AutomationService {
             // ──────────────────────────────────────────────────────────
             // PHASE 3: Scene Generation with checkpointing
             // ──────────────────────────────────────────────────────────
+            const bookBrief = await getBookBriefByProjectId(projectId);
+            logAutomation(projectId, 'book_brief_loaded_for_generation', {
+                bookBriefExists: Boolean(bookBrief),
+                configuredFieldCount: bookBrief ? Object.keys(bookBrief.toObject ? bookBrief.toObject() : bookBrief)
+                    .filter(key => !['_id', 'projectId', 'createdAt', 'updatedAt', '__v', 'notes'].includes(key))
+                    .length : 0
+            });
+
             logAutomation(projectId, 'scene_writing_started', { beatCount: bible.beats.length });
             project.status = 'writing';
             await project.save();
@@ -366,7 +378,7 @@ class AutomationService {
 
                     const prose = await aiService.generateScene(
                         beat, bible, project.style, project.language,
-                        '', previousContext, '', '', '', '', project
+                        '', previousContext, '', '', '', '', project, bookBrief
                     );
                     const sceneSummary = await aiService.generateSceneSummary(prose, project.language, project);
                     const wordCount = prose.split(/\s+/).filter(Boolean).length;
@@ -410,12 +422,12 @@ class AutomationService {
                     logAutomationError(projectId, 'scene_generation_failed', {
                         beatId: beat.id,
                         beatTitle: beat.title,
-                        error: err.message
+                        error: safeErrorForLog(err)
                     });
                     await updateProgress(projectId, {
                         phase: 'writing',
                         totalBeats,
-                        error: { beatId: beat.id, message: err.message }
+                        error: { beatId: beat.id, message: truncateForLog(err.message || String(err)) }
                     });
                 }
             }
@@ -448,9 +460,8 @@ class AutomationService {
 
         } catch (error) {
             logAutomationError(projectId, 'failed', {
-                error: error.message,
+                error: safeErrorForLog(error),
                 durationMs: Date.now() - startedAt,
-                stack: error.stack
             });
             try {
                 const proj = await Project.findById(projectId);

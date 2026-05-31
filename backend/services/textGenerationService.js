@@ -4,10 +4,16 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const {
     GEMINI_PROVIDER,
     LM_STUDIO_PROVIDER,
+    DEEPSEEK_PROVIDER,
     getLmStudioBaseUrl,
     getProviderDefaultModel,
     resolveTextGenerationConfig
 } = require('./textModelConfig');
+const { safeErrorForLog } = require('../utils/safeLog');
+const {
+    extractUsageTokens,
+    recordCostEntrySafe
+} = require('./costLedgerService');
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 let geminiClient;
@@ -28,6 +34,17 @@ function getLmStudioClient() {
     return new OpenAI({
         baseURL: getLmStudioBaseUrl(),
         apiKey: process.env.LM_STUDIO_API_KEY || 'lm-studio'
+    });
+}
+
+function getDeepSeekClient() {
+    if (!process.env.DEEPSEEK_API_KEY) {
+        throw new Error('DEEPSEEK_API_KEY is missing in backend .env file');
+    }
+
+    return new OpenAI({
+        baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
+        apiKey: process.env.DEEPSEEK_API_KEY
     });
 }
 
@@ -184,7 +201,10 @@ async function generateGeminiText(modelName, prompt, options = {}) {
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
-    return response.text();
+    return {
+        text: response.text(),
+        usage: extractUsageTokens(response.usageMetadata || result.response?.usageMetadata)
+    };
 }
 
 async function generateGeminiStructured(modelName, prompt, schema, options = {}) {
@@ -201,7 +221,10 @@ async function generateGeminiStructured(modelName, prompt, schema, options = {})
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
-    return extractJsonPayload(response.text());
+    return {
+        data: extractJsonPayload(response.text()),
+        usage: extractUsageTokens(response.usageMetadata || result.response?.usageMetadata)
+    };
 }
 
 async function generateLmStudioCompletion(modelName, prompt, options = {}, useJsonMode = false) {
@@ -227,7 +250,10 @@ async function generateLmStudioCompletion(modelName, prompt, options = {}, useJs
             response_format: useJsonMode ? { type: 'json_object' } : undefined
         });
 
-        return normalizeTextContent(completion.choices?.[0]?.message?.content);
+        return {
+            text: normalizeTextContent(completion.choices?.[0]?.message?.content),
+            usage: extractUsageTokens(completion.usage)
+        };
     } catch (error) {
         if (useJsonMode && /response_format|json_object|not supported|unsupported/i.test(error.message || '')) {
             const fallbackCompletion = await client.chat.completions.create({
@@ -246,7 +272,10 @@ async function generateLmStudioCompletion(modelName, prompt, options = {}, useJs
                 top_p: options.topP
             });
 
-            return normalizeTextContent(fallbackCompletion.choices?.[0]?.message?.content);
+            return {
+                text: normalizeTextContent(fallbackCompletion.choices?.[0]?.message?.content),
+                usage: extractUsageTokens(fallbackCompletion.usage)
+            };
         }
 
         throw error;
@@ -271,13 +300,18 @@ async function generateStructuredWithRetry(config, prompt, schema, schemaName, o
 
         try {
             const structuredPrompt = buildStructuredPrompt(prompt, schema, schemaName, validationErrors);
-            const rawData = config.provider === GEMINI_PROVIDER
+            const result = config.provider === GEMINI_PROVIDER
                 ? await generateGeminiStructured(config.model, structuredPrompt, schema, options)
-                : extractJsonPayload(await generateLmStudioCompletion(config.model, structuredPrompt, options, true));
+                : config.provider === DEEPSEEK_PROVIDER
+                    ? await generateOpenAICompatibleCompletion(getDeepSeekClient(), config.model, structuredPrompt, options, true)
+                    : await generateLmStudioCompletion(config.model, structuredPrompt, options, true);
+            const rawData = config.provider === GEMINI_PROVIDER
+                ? result.data
+                : extractJsonPayload(result.text);
 
             const validation = validateStructuredResponse(schema, rawData);
             if (validation.valid) {
-                return rawData;
+                return { data: rawData, usage: result.usage };
             }
 
             validationErrors = validation.errors;
@@ -305,7 +339,9 @@ async function generateTextWithRetry(config, model, prompt, options = {}) {
         try {
             return config.provider === GEMINI_PROVIDER
                 ? await generateGeminiText(model, prompt, options)
-                : await generateLmStudioCompletion(model, prompt, options, false);
+                : config.provider === DEEPSEEK_PROVIDER
+                    ? await generateOpenAICompatibleCompletion(getDeepSeekClient(), model, prompt, options, false)
+                    : await generateLmStudioCompletion(model, prompt, options, false);
         } catch (error) {
             lastError = error;
         }
@@ -314,33 +350,153 @@ async function generateTextWithRetry(config, model, prompt, options = {}) {
     throw lastError;
 }
 
-async function generateText({ project, prompt, options = {} }) {
-    const config = resolveTextGenerationConfig(project);
-    const startedAt = Date.now();
+function buildCostEntryBase({ project, config, model, mode, costMetadata, status, durationMs, usage, error }) {
+    const projectId = project?._id || project?.id;
+    return {
+        projectId,
+        task: costMetadata?.task || 'unknown',
+        stage: costMetadata?.stage || 'unknown',
+        provider: config.provider,
+        model: model || config.model || 'unknown',
+        requestType: costMetadata?.requestType || 'text',
+        status,
+        durationMs,
+        ...extractUsageTokens(usage),
+        metadata: {
+            mode,
+            source: costMetadata?.source,
+            beatId: costMetadata?.beatId,
+            chapterNumber: costMetadata?.chapterNumber,
+            sceneId: costMetadata?.sceneId,
+            batchJobId: costMetadata?.batchJobId,
+            wordCount: costMetadata?.wordCount
+        },
+        errorSummary: error?.message
+    };
+}
+
+async function generateOpenAICompatibleCompletion(client, modelName, prompt, options = {}, useJsonMode = false) {
+    const messages = [
+        {
+            role: 'system',
+            content: useJsonMode
+                ? 'You are a careful JSON generator. Reply only with valid JSON matching the requested schema.'
+                : 'You are a careful writing assistant. Reply directly to the user request.'
+        },
+        {
+            role: 'user',
+            content: prompt
+        }
+    ];
 
     try {
-        const model = getResolvedModelOrThrow(config);
-        const text = await generateTextWithRetry(config, model, prompt, options);
+        const completion = await client.chat.completions.create({
+            model: modelName,
+            messages,
+            temperature: options.temperature,
+            top_p: options.topP,
+            response_format: useJsonMode ? { type: 'json_object' } : undefined
+        });
 
-        console.log(`[TEXT AI] mode=text provider=${config.provider} model=${model} durationMs=${Date.now() - startedAt}`);
-        return { text, config: { ...config, model } };
+        return {
+            text: normalizeTextContent(completion.choices?.[0]?.message?.content),
+            usage: extractUsageTokens(completion.usage)
+        };
     } catch (error) {
-        console.error(`[TEXT AI] mode=text provider=${config.provider} model=${config.model || 'default'} failed`, error);
+        if (useJsonMode && /response_format|json_object|not supported|unsupported/i.test(error.message || '')) {
+            const fallbackCompletion = await client.chat.completions.create({
+                model: modelName,
+                messages,
+                temperature: options.temperature,
+                top_p: options.topP
+            });
+
+            return {
+                text: normalizeTextContent(fallbackCompletion.choices?.[0]?.message?.content),
+                usage: extractUsageTokens(fallbackCompletion.usage)
+            };
+        }
+
+        throw error;
+    }
+}
+
+function recordTextGenerationCostSafe(payload) {
+    if (!payload.project?._id && !payload.project?.id) return;
+    recordCostEntrySafe(buildCostEntryBase(payload));
+}
+
+async function generateText({ project, prompt, options = {}, costMetadata = {} }) {
+    const config = resolveTextGenerationConfig(project);
+    const startedAt = Date.now();
+    let model;
+
+    try {
+        model = getResolvedModelOrThrow(config);
+        const result = await generateTextWithRetry(config, model, prompt, options);
+        const durationMs = Date.now() - startedAt;
+
+        console.log(`[TEXT AI] mode=text provider=${config.provider} model=${model} durationMs=${durationMs}`);
+        recordTextGenerationCostSafe({
+            project,
+            config,
+            model,
+            mode: 'text',
+            costMetadata,
+            status: 'success',
+            durationMs,
+            usage: result.usage
+        });
+        return { text: result.text, config: { ...config, model }, usage: result.usage, durationMs };
+    } catch (error) {
+        console.error(`[TEXT AI] mode=text provider=${config.provider} model=${config.model || 'default'} failed`, safeErrorForLog(error));
+        recordTextGenerationCostSafe({
+            project,
+            config,
+            model,
+            mode: 'text',
+            costMetadata,
+            status: 'error',
+            durationMs: Date.now() - startedAt,
+            error
+        });
         throw buildProviderError(config, error);
     }
 }
 
-async function generateStructured({ project, prompt, schema, schemaName, options = {} }) {
+async function generateStructured({ project, prompt, schema, schemaName, options = {}, costMetadata = {} }) {
     const config = resolveTextGenerationConfig(project);
     const startedAt = Date.now();
+    let model;
 
     try {
-        const model = getResolvedModelOrThrow(config);
-        const data = await generateStructuredWithRetry({ ...config, model }, prompt, schema, schemaName, options);
-        console.log(`[TEXT AI] mode=structured provider=${config.provider} model=${model} durationMs=${Date.now() - startedAt}`);
-        return { data, config: { ...config, model } };
+        model = getResolvedModelOrThrow(config);
+        const result = await generateStructuredWithRetry({ ...config, model }, prompt, schema, schemaName, options);
+        const durationMs = Date.now() - startedAt;
+        console.log(`[TEXT AI] mode=structured provider=${config.provider} model=${model} durationMs=${durationMs}`);
+        recordTextGenerationCostSafe({
+            project,
+            config,
+            model,
+            mode: 'structured',
+            costMetadata,
+            status: 'success',
+            durationMs,
+            usage: result.usage
+        });
+        return { data: result.data, config: { ...config, model }, usage: result.usage, durationMs };
     } catch (error) {
-        console.error(`[TEXT AI] mode=structured provider=${config.provider} model=${config.model || 'default'} failed`, error);
+        console.error(`[TEXT AI] mode=structured provider=${config.provider} model=${config.model || 'default'} failed`, safeErrorForLog(error));
+        recordTextGenerationCostSafe({
+            project,
+            config,
+            model,
+            mode: 'structured',
+            costMetadata,
+            status: 'error',
+            durationMs: Date.now() - startedAt,
+            error
+        });
         throw buildProviderError(config, error);
     }
 }
@@ -381,6 +537,18 @@ async function listProviderModels(provider) {
                 baseUrl: getLmStudioBaseUrl()
             }, error);
         }
+    }
+
+    if (provider === DEEPSEEK_PROVIDER) {
+        const defaultModel = getProviderDefaultModel(DEEPSEEK_PROVIDER);
+        return [
+            {
+                id: defaultModel,
+                label: defaultModel,
+                provider: DEEPSEEK_PROVIDER,
+                source: 'static'
+            }
+        ];
     }
 
     throw new Error(`Unsupported provider: ${provider}`);

@@ -3,6 +3,11 @@ import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { Book, MapPin, Activity, Sparkles, Loader2, List, Layout, BookOpen, Edit3, Save, History, Settings, RefreshCw, RotateCcw, CheckCircle, AlertCircle, X, Image, Network, Download, FileSearch, Terminal } from 'lucide-react';
 import HybridEditor from '../components/HybridEditor';
+import BookBriefPanel from '../components/BookBriefPanel';
+import StoryRoomPanel from '../components/StoryRoomPanel';
+import PublishabilityPanel from '../components/PublishabilityPanel';
+import QualityReportPanel from '../components/QualityReportPanel';
+import PublishingPackagePanel from '../components/PublishingPackagePanel';
 import { API_BASE_URL, buildApiUrl, buildBackendUrl } from '../lib/api';
 
 const PROJECT_STATUSES_WITH_BIBLE = new Set(['bible_ready', 'writing', 'ready']);
@@ -13,7 +18,7 @@ export default function ProjectView() {
     const [bible, setBible] = useState(null);
     const [loading, setLoading] = useState(true);
     const [generating, setGenerating] = useState(false);
-    const [activeTab, setActiveTab] = useState('cover'); // 'cover', 'characters', 'locations', 'beats', 'board', 'hybrid', 'style', 'export'
+    const [activeTab, setActiveTab] = useState('cover');
     const [generatingCover, setGeneratingCover] = useState(false);
     const [coverPrompt, setCoverPrompt] = useState('');
     const [coverAuthor, setCoverAuthor] = useState('');
@@ -87,6 +92,9 @@ export default function ProjectView() {
     // Log Tab State
     const [logs, setLogs] = useState([]);
     const [loadingLogs, setLoadingLogs] = useState(false);
+    const [publishability, setPublishability] = useState(null);
+    const [loadingPublishability, setLoadingPublishability] = useState(false);
+    const [publishabilityError, setPublishabilityError] = useState('');
     const prevSceneSavedCountRef = useRef(0);
 
     const showToast = (message, type = 'success') => {
@@ -119,6 +127,19 @@ export default function ProjectView() {
             setScenes(res.data);
         } catch (e) {
             // silently ignore
+        }
+    };
+
+    const fetchPublishability = async () => {
+        setLoadingPublishability(true);
+        setPublishabilityError('');
+        try {
+            const res = await axios.get(buildApiUrl(`/projects/${id}/publishability`));
+            setPublishability(res.data);
+        } catch {
+            setPublishabilityError('Publishability check is not available right now. Please try again in a moment.');
+        } finally {
+            setLoadingPublishability(false);
         }
     };
 
@@ -192,6 +213,8 @@ export default function ProjectView() {
                 setAiSettings(null);
                 setAvailableAiProviders([]);
             }
+
+            fetchPublishability();
         } catch (error) {
             console.error("Failed to load project data", error);
         } finally {
@@ -729,7 +752,7 @@ export default function ProjectView() {
 
             <div className="flex-1 overflow-hidden flex flex-col">
                 {/* Tab Navigation */}
-                <div className="flex gap-1 bg-gray-900 p-1 rounded-xl mb-6 self-start border border-gray-700">
+                <div className="flex flex-wrap gap-1 bg-gray-900 p-1 rounded-xl mb-6 self-start border border-gray-700">
                     <button
                         onClick={() => setActiveTab('cover')}
                         className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'cover' ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
@@ -797,6 +820,36 @@ export default function ProjectView() {
                         <Download size={16} /> Exportar
                     </button>
                     <button
+                        onClick={() => setActiveTab('bookBrief')}
+                        className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'bookBrief' ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        <BookOpen size={16} /> Book Brief
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('storyRoom')}
+                        className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'storyRoom' ? 'bg-cyan-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        <Sparkles size={16} /> Story Room
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('publishability')}
+                        className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'publishability' ? 'bg-cyan-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        <FileSearch size={16} /> Readiness
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('quality')}
+                        className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'quality' ? 'bg-cyan-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        <CheckCircle size={16} /> Quality
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('publishing')}
+                        className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'publishing' ? 'bg-cyan-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        <Download size={16} /> Publishing
+                    </button>
+                    <button
                         onClick={() => setActiveTab('log')}
                         className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition ${activeTab === 'log' ? 'bg-slate-500 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
                     >
@@ -808,7 +861,7 @@ export default function ProjectView() {
                 </div>
 
                 <div className="flex-1 overflow-hidden bg-gray-800 rounded-xl border border-gray-700 flex flex-col">
-                    {!bible && activeTab !== 'board' && activeTab !== 'log' ? (
+                    {!bible && activeTab !== 'board' && activeTab !== 'log' && activeTab !== 'publishability' && activeTab !== 'bookBrief' && activeTab !== 'storyRoom' && activeTab !== 'quality' && activeTab !== 'publishing' ? (
                         <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
                             <Book size={48} className="mb-4 opacity-20" />
                             <p>No bible generated yet. Generate a Story Bible to see details.</p>
@@ -1349,6 +1402,31 @@ export default function ProjectView() {
 
                             {activeTab === 'hybrid' && (
                                 <HybridEditor projectId={id} showToast={showToast} />
+                            )}
+
+                            {activeTab === 'publishability' && (
+                                <PublishabilityPanel
+                                    data={publishability}
+                                    loading={loadingPublishability}
+                                    error={publishabilityError}
+                                    onRefresh={fetchPublishability}
+                                />
+                            )}
+
+                            {activeTab === 'bookBrief' && (
+                                <BookBriefPanel projectId={id} />
+                            )}
+
+                            {activeTab === 'storyRoom' && (
+                                <StoryRoomPanel projectId={id} />
+                            )}
+
+                            {activeTab === 'quality' && (
+                                <QualityReportPanel projectId={id} />
+                            )}
+
+                            {activeTab === 'publishing' && (
+                                <PublishingPackagePanel projectId={id} />
                             )}
 
                             {activeTab === 'export' && (

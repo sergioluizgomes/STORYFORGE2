@@ -5,6 +5,7 @@ const {
   allocateBeatWordBudget,
   findChapterForBeat,
   groupScenesForManuscript,
+  resolveBeatWordBudget,
   resolveChapterNumberForBeat,
   sortScenesForManuscript,
 } = require('../services/storyStructureService');
@@ -86,6 +87,99 @@ test('allocateBeatWordBudget does not return NaN', () => {
 
   assert.equal(Number.isNaN(budget.min), false);
   assert.equal(Number.isNaN(budget.max), false);
+});
+
+test('resolveBeatWordBudget divides chapter word count across 3 beats', () => {
+  const bible = {
+    chapters: [
+      { chapterNumber: 1, beats: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+    ],
+  };
+
+  const budget = resolveBeatWordBudget({
+    bible,
+    beat: { id: 2 },
+    chapterTypeConfig: { wordCount: { min: 2400, max: 3000 } },
+  });
+
+  assert.deepEqual(budget, { min: 800, max: 1000 });
+});
+
+test('resolveBeatWordBudget keeps full word count for a single-beat chapter', () => {
+  const bible = {
+    chapters: [
+      { chapterNumber: 1, beats: [{ id: 1 }] },
+    ],
+  };
+
+  const budget = resolveBeatWordBudget({
+    bible,
+    beat: { id: 1 },
+    chapterTypeConfig: { wordCount: { min: 2400, max: 3000 } },
+  });
+
+  assert.deepEqual(budget, { min: 2400, max: 3000 });
+});
+
+test('resolveBeatWordBudget uses a safe fallback when beat has no chapter', () => {
+  const budget = resolveBeatWordBudget({
+    bible: { chapters: [{ chapterNumber: 1, beats: [{ id: 1 }] }] },
+    beat: { id: 99 },
+    chapterTypeConfig: { wordCount: { min: 1200, max: 1800 } },
+  });
+
+  assert.deepEqual(budget, { min: 1200, max: 1800 });
+});
+
+test('resolveBeatWordBudget does not divide short story budgets as chapter budgets', () => {
+  const bible = {
+    chapters: [
+      { chapterNumber: 1, beats: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+    ],
+  };
+
+  const budget = resolveBeatWordBudget({
+    bible,
+    beat: { id: 2 },
+    chapterTypeConfig: { wordCount: { min: 2400, max: 3000 } },
+    isShortStory: true,
+  });
+
+  assert.deepEqual(budget, { min: 2400, max: 3000 });
+});
+
+test('resolveBeatWordBudget uses default word count when config is absent without NaN', () => {
+  const budget = resolveBeatWordBudget({
+    bible: { chapters: [{ chapterNumber: 1, beats: [{ id: 1 }, { id: 2 }] }] },
+    beat: { id: 1 },
+    defaultWordCount: { min: 1000, max: 1600 },
+  });
+
+  assert.deepEqual(budget, { min: 500, max: 800 });
+  assert.equal(Number.isNaN(budget.min), false);
+  assert.equal(Number.isNaN(budget.max), false);
+});
+
+test('resolveBeatWordBudget supports string and numeric beat ids', () => {
+  const bible = {
+    chapters: [
+      { chapterNumber: 1, beats: [{ id: 10 }, { id: '11' }] },
+    ],
+  };
+
+  const stringBudget = resolveBeatWordBudget({
+    bible,
+    beatId: '10',
+    chapterTypeConfig: { wordCount: { min: 1000, max: 1400 } },
+  });
+  const numericBudget = resolveBeatWordBudget({
+    bible,
+    beatId: 11,
+    chapterTypeConfig: { wordCount: { min: 1000, max: 1400 } },
+  });
+
+  assert.deepEqual(stringBudget, { min: 500, max: 700 });
+  assert.deepEqual(numericBudget, { min: 500, max: 700 });
 });
 
 test('sortScenesForManuscript orders scenes by chapterNumber and beatId', () => {

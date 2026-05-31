@@ -69,7 +69,10 @@ export default function NewProject() {
                     setStyle(narrRes.data[0].name);
                 }
             } catch (error) {
-                console.error('Error fetching styles:', error);
+                console.error('Error fetching styles:', {
+                    status: error.response?.status,
+                    message: error.response?.data?.error || error.response?.data?.message || error.message
+                });
             }
         };
         fetchData();
@@ -197,7 +200,10 @@ export default function NewProject() {
             createRequestKeyRef.current = null;
             navigate(`/project/${project._id}`);
         } catch (error) {
-            console.error('Error creating project:', error);
+            console.error('Error creating project:', {
+                status: error.response?.status,
+                message: error.response?.data?.error || error.response?.data?.message || error.message
+            });
             alert('Failed to create project');
         } finally {
             setLoading(false);
@@ -215,10 +221,12 @@ export default function NewProject() {
             return;
         }
 
-        console.log('Preparing to import file:', importFile.name, 'Size:', importFile.size);
-        console.log('File type:', importFile.type);
-        console.log('File object:', importFile);
-        console.log('File lastModified:', importFile.lastModified);
+        console.log('Preparing to import file:', {
+            name: importFile.name,
+            size: importFile.size,
+            type: importFile.type || 'unknown',
+            lastModified: importFile.lastModified
+        });
 
         // Check if file size is 0
         if (importFile.size === 0) {
@@ -235,10 +243,9 @@ export default function NewProject() {
             try {
                 // Modern approach
                 fileText = await importFile.text();
-                console.log('File content length:', fileText.length);
-                console.log('First 100 chars:', fileText.substring(0, 100));
+                console.log('Import file read successfully:', { length: fileText.length });
             } catch (readError) {
-                console.error('File.text() failed, trying FileReader:', readError);
+                console.error('File.text() failed, trying FileReader:', readError?.message || readError);
                 // Fallback to FileReader
                 try {
                     fileText = await new Promise((resolve, reject) => {
@@ -247,9 +254,9 @@ export default function NewProject() {
                         reader.onerror = (e) => reject(e);
                         reader.readAsText(importFile);
                     });
-                    console.log('FileReader success, content length:', fileText.length);
+                    console.log('FileReader success:', { length: fileText.length });
                 } catch (frError) {
-                    console.error('FileReader also failed:', frError);
+                    console.error('FileReader also failed:', frError?.message || frError);
                     alert('Could not read the selected file. Please try selecting it again.');
                     return;
                 }
@@ -264,9 +271,9 @@ export default function NewProject() {
             let jsonData;
             try {
                 jsonData = JSON.parse(fileText);
-                console.log('JSON parsed successfully, keys:', Object.keys(jsonData));
+                console.log('JSON parsed successfully:', { keys: Object.keys(jsonData) });
             } catch (parseError) {
-                console.error('JSON parse error:', parseError);
+                console.error('JSON parse error:', parseError?.message || parseError);
                 alert('Invalid JSON file. Please check the file format and try again.');
                 return;
             }
@@ -288,7 +295,10 @@ export default function NewProject() {
             importRequestKeyRef.current = null;
             navigate(`/project/${project._id}`);
         } catch (error) {
-            console.error('Error importing project:', error);
+            console.error('Error importing project:', {
+                status: error.response?.status,
+                message: error.response?.data?.error || error.response?.data?.message || error.message
+            });
             const backendError = error.response?.data?.error || error.response?.data?.message;
             alert('Failed to import project: ' + (backendError || error.message || 'Unexpected error.'));
         } finally {

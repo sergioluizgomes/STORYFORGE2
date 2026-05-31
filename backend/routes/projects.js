@@ -6,10 +6,57 @@ const Project = require('../models/Project');
 const Anthology = require('../models/Anthology');
 const Bible = require('../models/Bible');
 const Scene = require('../models/Scene');
+const BookBrief = require('../models/BookBrief');
+const QualityReport = require('../models/QualityReport');
+const QualityValidationRun = require('../models/QualityValidationRun');
+const PublishingPackage = require('../models/PublishingPackage');
+const CostLedger = require('../models/CostLedger');
 const ImageStyle = require('../models/ImageStyle');
 const mongoose = require('mongoose');
 const fs = require('fs');
 const { createHash } = require('crypto');
+const { redactSensitiveKeys, safeErrorForLog } = require('../utils/safeLog');
+const {
+    evaluateProjectPublishability,
+    evaluatePublishabilitySnapshot
+} = require('../services/publishabilityService');
+const {
+    getSafeContentType,
+    resolveSafeRelativeFilePath,
+    summarizeFilenameForLog
+} = require('../utils/fileSecurity');
+const {
+    getBookBriefByProjectId,
+    upsertBookBriefForProject,
+    deleteBookBriefForProject
+} = require('../services/bookBriefService');
+const {
+    suggestBookBriefForProject,
+    applyBookBriefSuggestion
+} = require('../services/storyDirectionService');
+const {
+    generateQualityReportForProject,
+    toQualityReportResponse
+} = require('../services/qualityService');
+const {
+    generateAIEditorialQualityReportForProject
+} = require('../services/aiEditorialQualityService');
+const {
+    judgeEditorialReportForProject
+} = require('../services/editorialReportJudgeService');
+const {
+    runQualityValidationForProject,
+    getLatestQualityValidationRun
+} = require('../services/qualityValidationRunService');
+const {
+    generatePublishingPackageForProject,
+    getLatestPublishingPackage,
+    toPublishingPackageResponse
+} = require('../services/publishingPackageService');
+const {
+    buildCostSummary,
+    toCostLedgerResponse
+} = require('../services/costLedgerService');
 
 function normalizeTextAiValues(payload = {}) {
     const updates = { ...payload };
@@ -252,11 +299,11 @@ function safeUnlink(filePath) {
 }
 
 function logProjectCreation(event, details = {}) {
-    console.log(`[PROJECT_CREATE] ${event}`, details);
+    console.log(`[PROJECT_CREATE] ${event}`, redactSensitiveKeys(details));
 }
 
 function logProjectCreationError(event, details = {}) {
-    console.error(`[PROJECT_CREATE] ${event}`, details);
+    console.error(`[PROJECT_CREATE] ${event}`, redactSensitiveKeys(details));
 }
 
 const automationService = require('../services/automationService');
@@ -567,16 +614,21 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
     const idempotencyKey = getIdempotencyKey(req);
     let requestIdentity;
     let pendingRequest;
-    console.log('Received import request');
-    console.log('Request headers:', req.headers);
-    console.log('Request body type:', typeof req.body);
-    console.log('Request body keys:', req.body ? Object.keys(req.body) : 'null');
+    logProjectCreation('import_request_received', {
+        idempotencyKey: idempotencyKey || '(missing)',
+        contentType: req.headers['content-type'] || 'unknown',
+        bodyType: typeof req.body,
+        bodyKeys: req.body ? Object.keys(req.body) : []
+    });
     
     try {
         const importData = req.body;
         
         if (!importData || Object.keys(importData).length === 0) {
-            console.error('Empty request body');
+            logProjectCreationError('import_validation_failed', {
+                reason: 'empty_request_body',
+                idempotencyKey: idempotencyKey || '(missing)'
+            });
             return res.status(400).json({ error: 'No JSON data provided' });
         }
 
@@ -624,14 +676,28 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
 
         const { project, bible, scenes } = importData;
         const { updates: importedAiOverrides } = normalizeTextAiValues(project || {});
-        console.log('Import data keys:', Object.keys(importData));
+        logProjectCreation('import_payload_summary', {
+            idempotencyKey: idempotencyKey || '(missing)',
+            importKeys: Object.keys(importData),
+            hasProject: Boolean(project),
+            hasBible: Boolean(bible),
+            chapterCount: bible?.chapters?.length || project?.initialChapterStructure?.length || 0,
+            topLevelBeatCount: bible?.beats?.length || 0,
+            sceneCount: Array.isArray(scenes) ? scenes.length : 0
+        });
 
         if (!project || !project.name) {
-            console.error('Missing project data');
+            logProjectCreationError('import_validation_failed', {
+                reason: 'missing_project_data',
+                idempotencyKey: idempotencyKey || '(missing)'
+            });
             return res.status(400).json({ error: 'Missing project data in JSON' });
         }
 
-        console.log('Creating project:', project.name);
+        logProjectCreation('import_project_create_started', {
+            name: project.name,
+            idempotencyKey: idempotencyKey || '(missing)'
+        });
 
         // 1. Create Project
         const newProject = new Project({
@@ -650,7 +716,9 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
 
         // Handle Image Style if provided (by ID or Name)
         if (project.imageStyle) {
-            console.log('Processing image style:', project.imageStyle);
+            logProjectCreation('import_image_style_received', {
+                imageStyle: project.imageStyle
+            });
             // If it looks like an ObjectId, use it
             if (mongoose.Types.ObjectId.isValid(project.imageStyle)) {
                 newProject.imageStyle = project.imageStyle;
@@ -659,9 +727,14 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
                 const style = await ImageStyle.findOne({ name: project.imageStyle });
                 if (style) {
                     newProject.imageStyle = style._id;
-                    console.log('Found image style by name:', style.name);
+                    logProjectCreation('import_image_style_resolved', {
+                        imageStyleId: style._id.toString(),
+                        imageStyleName: style.name
+                    });
                 } else {
-                    console.warn('Image style not found:', project.imageStyle);
+                    logProjectCreation('import_image_style_not_found', {
+                        imageStyle: project.imageStyle
+                    });
                 }
             }
         }
@@ -688,11 +761,21 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
         }
 
         pendingRequest.resolve(persistedProject);
-        console.log('Project saved with ID:', persistedProject._id);
+        logProjectCreation('import_project_saved', {
+            projectId: persistedProject._id.toString(),
+            name: persistedProject.name,
+            durationMs: Date.now() - startedAt
+        });
 
         // 2. Create Bible
         if (bible) {
-            console.log('Creating Bible...');
+            logProjectCreation('import_bible_create_started', {
+                projectId: persistedProject._id.toString(),
+                characterCount: bible.characters?.length || 0,
+                settingCount: bible.settings?.length || 0,
+                chapterCount: bible.chapters?.length || 0,
+                topLevelBeatCount: bible.beats?.length || 0
+            });
             const newBible = new Bible({
                 projectId: persistedProject._id,
                 summary: bible.summary,
@@ -704,14 +787,22 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
                 beats: bible.beats || []
             });
             await newBible.save();
-            console.log('Bible saved');
+            logProjectCreation('import_bible_saved', {
+                projectId: persistedProject._id.toString(),
+                bibleId: newBible._id.toString()
+            });
         } else {
-            console.warn('No bible data found in import');
+            logProjectCreation('import_bible_missing', {
+                projectId: persistedProject._id.toString()
+            });
         }
 
         // 3. Create Scenes
         if (scenes && Array.isArray(scenes)) {
-            console.log(`Processing ${scenes.length} scenes...`);
+            logProjectCreation('import_scenes_create_started', {
+                projectId: persistedProject._id.toString(),
+                sceneCount: scenes.length
+            });
             const sceneDocs = scenes.map(scene => ({
                 projectId: persistedProject._id,
                 beatId: scene.beatId,
@@ -725,10 +816,15 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
             
             if (sceneDocs.length > 0) {
                 await Scene.insertMany(sceneDocs);
-                console.log('Scenes saved');
+                logProjectCreation('import_scenes_saved', {
+                    projectId: persistedProject._id.toString(),
+                    sceneCount: sceneDocs.length
+                });
             }
         } else {
-            console.warn('No scenes data found or invalid format');
+            logProjectCreation('import_scenes_missing_or_invalid', {
+                projectId: persistedProject._id.toString()
+            });
         }
 
         res.status(201).json(persistedProject);
@@ -750,11 +846,18 @@ router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
             }
         }
 
-        console.error('Error importing project:', error);
+        logProjectCreationError('import_failed', {
+            idempotencyKey: idempotencyKey || '(missing)',
+            requestIdentity: requestIdentity || '(unassigned)',
+            error: safeErrorForLog(error),
+            durationMs: Date.now() - startedAt
+        });
         if (error.name === 'ValidationError') {
-             console.error('Validation Error Details:', JSON.stringify(error.errors, null, 2));
+            logProjectCreationError('import_validation_error_details', {
+                errors: redactSensitiveKeys(error.errors)
+            });
         }
-        res.status(500).json({ error: 'Failed to import project: ' + error.message });
+        res.status(500).json({ error: 'Failed to import project' });
     } finally {
         if (requestIdentity && activeProjectRequests.get(requestIdentity) === pendingRequest?.promise) {
             activeProjectRequests.delete(requestIdentity);
@@ -769,6 +872,499 @@ router.get('/', async (req, res) => {
         res.json(projects);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch projects' });
+    }
+});
+
+// GET /api/projects/:id/publishability - Calculated technical publishability gate
+router.get('/:id/publishability', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json(evaluatePublishabilitySnapshot({ project: null, bible: null, scenes: [] }));
+        }
+
+        const result = await evaluateProjectPublishability(req.params.id);
+
+        if (!result.projectId) {
+            return res.status(404).json(result);
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('[PUBLISHABILITY] evaluation_failed', safeErrorForLog(error));
+        res.status(500).json({ error: 'Failed to evaluate project publishability' });
+    }
+});
+
+// POST /api/projects/:id/quality-report - Generate and save a heuristic QualityReport
+router.post('/:id/quality-report', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const report = await generateQualityReportForProject(req.params.id);
+        if (!report) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.status(201).json({ exists: true, qualityReport: report });
+    } catch (error) {
+        console.error('[QUALITY_REPORT] generation_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to generate QualityReport' });
+    }
+});
+
+// POST /api/projects/:id/quality-report/ai-editorial - Generate and save an AI editorial QualityReport
+router.post('/:id/quality-report/ai-editorial', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const report = await generateAIEditorialQualityReportForProject(req.params.id);
+        if (!report) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.status(201).json({ exists: true, qualityReport: report });
+    } catch (error) {
+        console.error('[AI_EDITORIAL_QUALITY] route_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to generate AI Editorial QualityReport' });
+    }
+});
+
+// POST /api/projects/:id/quality-report/:reportId/judge - Evaluate an AI editorial QualityReport
+router.post('/:id/quality-report/:reportId/judge', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id) || !mongoose.Types.ObjectId.isValid(req.params.reportId)) {
+            return res.status(404).json({ error: 'QualityReport not found' });
+        }
+
+        const evaluation = await judgeEditorialReportForProject(req.params.id, req.params.reportId);
+        if (!evaluation) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.status(201).json({ editorialJudge: evaluation });
+    } catch (error) {
+        const statusCode = error.statusCode || 500;
+        console.error('[EDITORIAL_REPORT_JUDGE] route_failed', {
+            projectId: req.params.id,
+            qualityReportId: req.params.reportId,
+            statusCode,
+            error: safeErrorForLog(error)
+        });
+        res.status(statusCode).json({
+            error: statusCode === 400
+                ? 'Only AI editorial QualityReports can be judged'
+                : statusCode === 404
+                    ? 'QualityReport not found'
+                    : 'Failed to judge AI Editorial QualityReport'
+        });
+    }
+});
+
+// POST /api/projects/:id/quality-validation-run - Run consolidated editorial validation
+router.post('/:id/quality-validation-run', express.json(), async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const result = await runQualityValidationForProject(req.params.id, {
+            regenerateHeuristic: req.body?.regenerateHeuristic !== false,
+            regenerateEditorial: req.body?.regenerateEditorial !== false,
+            regenerateJudge: req.body?.regenerateJudge !== false
+        });
+
+        if (!result) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.status(201).json(result);
+    } catch (error) {
+        console.error('[QUALITY_VALIDATION_RUN] route_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to run Quality Validation' });
+    }
+});
+
+// GET /api/projects/:id/quality-validation-run/latest - Get latest consolidated validation
+router.get('/:id/quality-validation-run/latest', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const validationRun = await getLatestQualityValidationRun(req.params.id);
+        if (!validationRun) {
+            return res.json({ exists: false, validationRun: null });
+        }
+
+        res.json({
+            exists: true,
+            validationRun,
+            markdownReport: validationRun.markdownReport
+        });
+    } catch (error) {
+        console.error('[QUALITY_VALIDATION_RUN] latest_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to fetch latest Quality Validation Run' });
+    }
+});
+
+// GET /api/projects/:id/quality-report/latest - Get the latest QualityReport for a project
+router.get('/:id/quality-report/latest', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const source = typeof req.query.source === 'string' ? req.query.source.trim() : '';
+        const query = { projectId: req.params.id };
+        if (source) {
+            query.source = source;
+        }
+
+        const report = await QualityReport.findOne(query).sort({ createdAt: -1 });
+        if (!report) {
+            return res.json({ exists: false, qualityReport: null });
+        }
+
+        res.json({ exists: true, qualityReport: toQualityReportResponse(report) });
+    } catch (error) {
+        console.error('[QUALITY_REPORT] latest_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to fetch latest QualityReport' });
+    }
+});
+
+// GET /api/projects/:id/quality-reports - List summarized QualityReports for a project
+router.get('/:id/quality-reports', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const reports = await QualityReport.find({ projectId: req.params.id })
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .select('source manuscriptVersion overallScore publishable summary metadata.sceneCount metadata.totalWordCount createdAt updatedAt');
+
+        res.json({
+            exists: reports.length > 0,
+            qualityReports: reports.map(toQualityReportResponse)
+        });
+    } catch (error) {
+        console.error('[QUALITY_REPORT] list_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to list QualityReports' });
+    }
+});
+
+// POST /api/projects/:id/publishing-package - Generate and save a heuristic PublishingPackage
+router.post('/:id/publishing-package', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const publishingPackage = await generatePublishingPackageForProject(req.params.id);
+        if (!publishingPackage) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.status(201).json({ exists: true, publishingPackage });
+    } catch (error) {
+        console.error('[PUBLISHING_PACKAGE] generation_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to generate PublishingPackage' });
+    }
+});
+
+// GET /api/projects/:id/publishing-package/latest - Get the latest PublishingPackage for a project
+router.get('/:id/publishing-package/latest', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const publishingPackage = await getLatestPublishingPackage(req.params.id);
+        if (!publishingPackage) {
+            return res.json({ exists: false, publishingPackage: null });
+        }
+
+        res.json({ exists: true, publishingPackage });
+    } catch (error) {
+        console.error('[PUBLISHING_PACKAGE] latest_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to fetch latest PublishingPackage' });
+    }
+});
+
+// GET /api/projects/:id/publishing-packages - List summarized PublishingPackages for a project
+router.get('/:id/publishing-packages', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const packages = await PublishingPackage.find({ projectId: req.params.id })
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .select('source version status title language aiDisclosure readinessSummary complianceWarnings metadata.publishabilityScore metadata.qualityScore metadata.generatedAt createdAt updatedAt');
+
+        res.json({
+            exists: packages.length > 0,
+            publishingPackages: packages.map(toPublishingPackageResponse)
+        });
+    } catch (error) {
+        console.error('[PUBLISHING_PACKAGE] list_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to list PublishingPackages' });
+    }
+});
+
+// GET /api/projects/:id/book-brief - Get the editorial BookBrief for a project
+router.get('/:id/book-brief', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const project = await Project.findById(req.params.id).select('_id');
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+
+        const bookBrief = await getBookBriefByProjectId(project._id);
+        res.json({
+            exists: Boolean(bookBrief),
+            bookBrief: bookBrief || null
+        });
+    } catch (error) {
+        console.error('[BOOK_BRIEF] fetch_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to fetch BookBrief' });
+    }
+});
+
+// PUT /api/projects/:id/book-brief - Create or update the editorial BookBrief for a project
+router.put('/:id/book-brief', express.json({ limit: '200kb' }), async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const project = await Project.findById(req.params.id).select('_id');
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+
+        const bookBrief = await upsertBookBriefForProject(project._id, req.body || {});
+
+        res.json({
+            exists: true,
+            bookBrief
+        });
+    } catch (error) {
+        if (error?.name === 'BookBriefValidationError') {
+            return res.status(400).json({
+                error: 'Invalid BookBrief input',
+                details: error.validationErrors || []
+            });
+        }
+
+        console.error('[BOOK_BRIEF] upsert_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to save BookBrief' });
+    }
+});
+
+// POST /api/projects/:id/book-brief/ai-suggest - Suggest BookBrief and story direction without saving
+router.post('/:id/book-brief/ai-suggest', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const suggestion = await suggestBookBriefForProject(req.params.id);
+        if (!suggestion) return res.status(404).json({ error: 'Project not found' });
+
+        res.json(suggestion);
+    } catch (error) {
+        console.error('[AI_BOOK_BRIEF] route_suggest_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to generate AI BookBrief suggestion' });
+    }
+});
+
+// PUT /api/projects/:id/book-brief/apply-ai-suggestion - Apply only fields approved by the author
+router.put('/:id/book-brief/apply-ai-suggestion', express.json({ limit: '300kb' }), async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const project = await Project.findById(req.params.id).select('_id');
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+
+        const result = await applyBookBriefSuggestion(project._id, {
+            suggestion: req.body?.suggestion,
+            approvedFields: req.body?.approvedFields
+        });
+
+        res.json({
+            exists: true,
+            appliedFields: result.appliedFields,
+            bookBrief: result.bookBrief
+        });
+    } catch (error) {
+        if (error?.name === 'BookBriefApplyValidationError' || error?.name === 'BookBriefValidationError') {
+            return res.status(400).json({
+                error: 'Invalid AI BookBrief application',
+                details: error.validationErrors || []
+            });
+        }
+
+        console.error('[AI_BOOK_BRIEF] route_apply_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to apply AI BookBrief suggestion' });
+    }
+});
+
+// DELETE /api/projects/:id/book-brief - Remove the editorial BookBrief for a project
+router.delete('/:id/book-brief', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const project = await Project.findById(req.params.id).select('_id');
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+
+        const deletedBookBrief = await deleteBookBriefForProject(project._id);
+
+        res.json({
+            exists: false,
+            deleted: Boolean(deletedBookBrief),
+            bookBrief: null
+        });
+    } catch (error) {
+        console.error('[BOOK_BRIEF] delete_failed', {
+            projectId: req.params.id,
+            error: safeErrorForLog(error)
+        });
+        res.status(500).json({ error: 'Failed to delete BookBrief' });
+    }
+});
+
+function parseCostLimit(value) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 50;
+    return Math.min(parsed, 200);
+}
+
+function buildCostLedgerQuery(projectId, query = {}) {
+    const filters = { projectId };
+    for (const field of ['task', 'provider', 'status']) {
+        if (typeof query[field] === 'string' && query[field].trim()) {
+            filters[field] = query[field].trim();
+        }
+    }
+    return filters;
+}
+
+function summarizeRouteError(error) {
+    return {
+        name: error?.name,
+        message: error?.message,
+        code: error?.code,
+        status: error?.status || error?.statusCode || error?.response?.status
+    };
+}
+
+// GET /api/projects/:id/costs/summary - Get CostLedger summary only
+router.get('/:id/costs/summary', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const project = await Project.findById(req.params.id).select('_id');
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+
+        const filters = buildCostLedgerQuery(project._id, req.query);
+        const entries = await CostLedger.find(filters).lean();
+
+        res.json({
+            projectId: project._id.toString(),
+            summary: buildCostSummary(entries)
+        });
+    } catch (error) {
+        console.error('[COST_LEDGER] summary_failed', {
+            projectId: req.params.id,
+            error: summarizeRouteError(error)
+        });
+        res.status(500).json({ error: 'Failed to fetch project cost summary' });
+    }
+});
+
+// GET /api/projects/:id/costs - List summarized CostLedger entries and project summary
+router.get('/:id/costs', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const project = await Project.findById(req.params.id).select('_id');
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+
+        const filters = buildCostLedgerQuery(project._id, req.query);
+        const limit = parseCostLimit(req.query.limit);
+        const [summaryEntries, entries] = await Promise.all([
+            CostLedger.find(filters).lean(),
+            CostLedger.find(filters)
+                .sort({ createdAt: -1 })
+                .limit(limit)
+                .lean()
+        ]);
+
+        res.json({
+            projectId: project._id.toString(),
+            summary: buildCostSummary(summaryEntries),
+            entries: entries.map(toCostLedgerResponse)
+        });
+    } catch (error) {
+        console.error('[COST_LEDGER] list_failed', {
+            projectId: req.params.id,
+            error: summarizeRouteError(error)
+        });
+        res.status(500).json({ error: 'Failed to fetch project costs' });
     }
 });
 
@@ -822,6 +1418,16 @@ router.delete('/:id', async (req, res) => {
             Bible.deleteMany({ projectId: projectId }),
             // Delete Scenes
             Scene.deleteMany({ projectId: projectId }),
+            // Delete BookBrief
+            BookBrief.deleteMany({ projectId: projectId }),
+            // Delete QualityReports
+            QualityReport.deleteMany({ projectId: projectId }),
+            // Delete QualityValidationRuns
+            QualityValidationRun.deleteMany({ projectId: projectId }),
+            // Delete PublishingPackages
+            PublishingPackage.deleteMany({ projectId: projectId }),
+            // Delete CostLedger entries
+            CostLedger.deleteMany({ projectId: projectId }),
             // Remove project from any anthologies
             Anthology.updateMany(
                 { projectIds: projectId },
@@ -842,7 +1448,7 @@ router.delete('/:id', async (req, res) => {
 
         res.json({ message: 'Project deleted successfully', deletedProjectId: projectId });
     } catch (error) {
-        console.error('Error deleting project:', error);
+        console.error('Error deleting project:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to delete project: ' + error.message });
     }
 });
@@ -869,7 +1475,7 @@ router.post('/:id/resume-automation', express.json(), async (req, res) => {
         automationService.runFullAutomation(project._id, { resume: true });
         res.json({ message: 'Automation resuming', projectId: project._id, status: project.status });
     } catch (error) {
-        console.error('Resume automation error:', error);
+        console.error('Resume automation error:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to resume automation' });
     }
 });
@@ -891,7 +1497,7 @@ router.get('/:id/export-pdf', async (req, res) => {
 
         await pdfService.generateProjectPDF(project, bible, scenes, res);
     } catch (error) {
-        console.error('PDF Export Error:', error);
+        console.error('PDF Export Error:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to generate PDF' });
     }
 });
@@ -931,7 +1537,7 @@ router.post('/anthology', express.json(), async (req, res) => {
                 enhancedPrompt += ". Portrait aspect ratio 9:16.";
                 coverImageUrl = await imageService.generateCharacterImageSafe(enhancedPrompt, "", '9:16');
             } catch (err) {
-                console.error("Anthology Cover Generation Error:", err);
+                console.error("Anthology Cover Generation Error:", safeErrorForLog(err));
             }
         }
 
@@ -968,7 +1574,7 @@ router.post('/anthology', express.json(), async (req, res) => {
         await anthology.save();
 
     } catch (error) {
-        console.error('Anthology Generation Error:', error);
+        console.error('Anthology Generation Error:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to generate anthology' });
     }
 });
@@ -981,7 +1587,7 @@ router.get('/lists/anthologies', async (req, res) => {
             .sort({ createdAt: -1 });
         res.json(anthologies);
     } catch (error) {
-        console.error('Error fetching anthologies:', error);
+        console.error('Error fetching anthologies:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to fetch anthologies' });
     }
 });
@@ -994,14 +1600,34 @@ router.get('/anthologies/:id/download', async (req, res) => {
             return res.status(404).json({ error: 'Anthology or PDF not found' });
         }
 
-        const fullPath = path.join(__dirname, '..', anthology.pdfPath);
+        const fullPath = resolveSafeRelativeFilePath(path.join(__dirname, '..', 'uploads'), anthology.pdfPath);
+        if (!fullPath) {
+            console.warn('[ANTHOLOGY_DOWNLOAD] blocked_file_request', {
+                reason: 'invalid_saved_path',
+                filename: summarizeFilenameForLog(anthology.pdfPath)
+            });
+            return res.status(404).json({ error: 'PDF file not found on server' });
+        }
+
         if (!fs.existsSync(fullPath)) {
             return res.status(404).json({ error: 'PDF file not found on server' });
         }
 
-        res.download(fullPath, `${anthology.title.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+        const downloadName = `${anthology.title.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+        res.setHeader('Content-Type', getSafeContentType(downloadName));
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Cache-Control', 'private, no-store');
+        res.download(fullPath, downloadName, (error) => {
+            if (error && !res.headersSent) {
+                console.error('[ANTHOLOGY_DOWNLOAD] file_send_failed', {
+                    code: error.code,
+                    status: error.status || error.statusCode
+                });
+                res.status(404).json({ error: 'PDF file not found on server' });
+            }
+        });
     } catch (error) {
-        console.error('Download error:', error);
+        console.error('Download error:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to download anthology' });
     }
 });
@@ -1025,7 +1651,7 @@ router.post('/anthology/preview-cover', express.json(), async (req, res) => {
 
         res.json({ imageUrl });
     } catch (error) {
-        console.error('Cover preview error:', error);
+        console.error('Cover preview error:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to generate cover preview' });
     }
 });
@@ -1037,7 +1663,7 @@ router.get('/anthologies/:id', async (req, res) => {
         if (!anthology) return res.status(404).json({ error: 'Anthology not found' });
         res.json(anthology);
     } catch (error) {
-        console.error('Error fetching anthology:', error);
+        console.error('Error fetching anthology:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed' });
     }
 });
@@ -1081,7 +1707,7 @@ router.put('/anthologies/:id', express.json(), async (req, res) => {
         await anthology.save();
         res.json(anthology);
     } catch (error) {
-        console.error('Error updating anthology:', error);
+        console.error('Error updating anthology:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to update anthology' });
     }
 });
@@ -1119,7 +1745,7 @@ router.post('/:id/analyze-chapter', express.json(), async (req, res) => {
 
         res.json({ analysis, chapter });
     } catch (error) {
-        console.error('Error analyzing chapter:', error);
+        console.error('Error analyzing chapter:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to analyze chapter: ' + error.message });
     }
 });
@@ -1169,7 +1795,7 @@ router.post('/:id/analyze-all-chapters', express.json(), async (req, res) => {
                     success: true
                 });
             } catch (error) {
-                console.error(`Error analyzing chapter ${chapter.chapterNumber}:`, error);
+                console.error(`Error analyzing chapter ${chapter.chapterNumber}:`, safeErrorForLog(error));
                 errorCount++;
                 results.push({
                     chapterNumber: chapter.chapterNumber,
@@ -1190,7 +1816,7 @@ router.post('/:id/analyze-all-chapters', express.json(), async (req, res) => {
             results
         });
     } catch (error) {
-        console.error('Error analyzing all chapters:', error);
+        console.error('Error analyzing all chapters:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to analyze chapters: ' + error.message });
     }
 });
@@ -1220,7 +1846,7 @@ router.get('/:id/chapters/:chapterNumber/analysis/export-pdf', async (req, res) 
 
         await pdfService.generateChapterAnalysisPDF(project, chapter, res);
     } catch (error) {
-        console.error('Chapter analysis PDF error:', error);
+        console.error('Chapter analysis PDF error:', safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to export chapter analysis' });
     }
 });

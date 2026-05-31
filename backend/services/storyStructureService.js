@@ -55,6 +55,28 @@ function allocateBeatWordBudget(chapterTypeConfig, beatsInChapterCount) {
   };
 }
 
+function resolveBeatWordBudget({
+  bible,
+  beat,
+  beatId,
+  chapterTypeConfig,
+  defaultWordCount,
+  isShortStory = false,
+} = {}) {
+  const selectedBeatId = beatId ?? beat?.id ?? beat?.beatId;
+  const baseWordCount = chapterTypeConfig?.wordCount ?? defaultWordCount ?? {};
+  const safeChapterConfig = { wordCount: baseWordCount };
+
+  if (isShortStory) {
+    return allocateBeatWordBudget(safeChapterConfig, 1);
+  }
+
+  const chapter = findChapterForBeat(bible, selectedBeatId);
+  const beats = Array.isArray(chapter?.beats) ? chapter.beats : [];
+
+  return allocateBeatWordBudget(safeChapterConfig, beats.length || 1);
+}
+
 function getFiniteNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -190,6 +212,7 @@ module.exports = {
   allocateBeatWordBudget,
   findChapterForBeat,
   groupScenesForManuscript,
+  resolveBeatWordBudget,
   resolveChapterNumberForBeat,
   sortScenesForManuscript,
 };

@@ -5,7 +5,40 @@ const Project = require('../models/Project');
 const Bible = require('../models/Bible');
 const Scene = require('../models/Scene');
 const aiService = require('../services/aiService');
+const { getBookBriefByProjectId } = require('../services/bookBriefService');
 const { findChapterForBeat, resolveChapterNumberForBeat } = require('../services/storyStructureService');
+const { safeErrorForLog } = require('../utils/safeLog');
+
+function countConfiguredBookBriefFields(bookBrief) {
+    if (!bookBrief) return 0;
+
+    const source = typeof bookBrief.toObject === 'function' ? bookBrief.toObject() : bookBrief;
+    return [
+        'genre',
+        'subgenre',
+        'targetAudience',
+        'language',
+        'tone',
+        'narrativeVoice',
+        'targetWordCount',
+        'targetChapterCount',
+        'monetizationMode',
+        'seriesName',
+        'bookNumber',
+        'aiDisclosure',
+        'humanReviewStatus',
+        'contentGuidelines',
+        'mustInclude',
+        'mustAvoid',
+        'comparableTitles',
+        'keywords'
+    ].filter((field) => {
+        const value = source[field];
+        if (Array.isArray(value)) return value.length > 0;
+        if (value && typeof value === 'object') return Object.keys(value).length > 0;
+        return value !== undefined && value !== null && String(value).trim().length > 0;
+    }).length;
+}
 
 // GET /api/scenes/project/:projectId
 // Get all scenes for a project
@@ -30,6 +63,12 @@ router.post('/generate', async (req, res) => {
 
         const bible = await Bible.findOne({ projectId });
         if (!bible) return res.status(404).json({ error: 'Bible not found' });
+        const bookBrief = await getBookBriefByProjectId(projectId);
+        console.log('[SCENE GENERATE] BookBrief prompt context', {
+            projectId,
+            bookBriefExists: Boolean(bookBrief),
+            configuredFieldCount: countConfiguredBookBriefFields(bookBrief)
+        });
 
         console.log(`[SCENE GENERATE] Looking for beatId: ${beatId} (type: ${typeof beatId})`);
         console.log(`[SCENE GENERATE] bible.beats exists: ${!!bible.beats}, length: ${bible.beats?.length || 0}`);
@@ -196,7 +235,8 @@ router.post('/generate', async (req, res) => {
             existingContent,
             editorialAnalysis,
             nextContext,
-            project
+            project,
+            bookBrief
         );
 
         // 3.1 Generate Summary for the new content
@@ -243,7 +283,7 @@ router.post('/generate', async (req, res) => {
         res.json(scene);
 
     } catch (error) {
-        console.error("Scene Generation Error:", error);
+        console.error("Scene Generation Error:", safeErrorForLog(error));
         res.status(500).json({ error: error.message });
     }
 });
@@ -260,6 +300,12 @@ router.post('/generate-chapter', async (req, res) => {
 
         const bible = await Bible.findOne({ projectId });
         if (!bible) return res.status(404).json({ error: 'Bible not found' });
+        const bookBrief = await getBookBriefByProjectId(projectId);
+        console.log('[CHAPTER GENERATE] BookBrief prompt context', {
+            projectId,
+            bookBriefExists: Boolean(bookBrief),
+            configuredFieldCount: countConfiguredBookBriefFields(bookBrief)
+        });
 
         const chapter = bible.chapters.find(c => c.chapterNumber === chapterNumber);
         if (!chapter) return res.status(404).json({ error: 'Chapter not found in Bible' });
@@ -311,7 +357,8 @@ router.post('/generate-chapter', async (req, res) => {
                     "",
                     "",
                     nextContext,
-                    project
+                    project,
+                    bookBrief
                 );
 
                 // Generate summary
@@ -360,7 +407,7 @@ router.post('/generate-chapter', async (req, res) => {
 
                 console.log(`✓ Generated scene for Beat ${beat.id}: ${beat.title}`);
             } catch (error) {
-                console.error(`✗ Failed to generate scene for Beat ${beat.id}:`, error.message);
+                console.error(`✗ Failed to generate scene for Beat ${beat.id}:`, safeErrorForLog(error));
                 // Continue with next beat even if one fails
             }
         }
@@ -372,7 +419,7 @@ router.post('/generate-chapter', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Chapter Scene Generation Error:", error);
+        console.error("Chapter Scene Generation Error:", safeErrorForLog(error));
         res.status(500).json({ error: error.message });
     }
 });
@@ -388,6 +435,7 @@ router.post('/prompt', async (req, res) => {
 
         const bible = await Bible.findOne({ projectId });
         if (!bible) return res.status(404).json({ error: 'Bible not found' });
+        const bookBrief = await getBookBriefByProjectId(projectId);
 
         console.log(`[SCENE PROMPT] Looking for beatId: ${beatId} (type: ${typeof beatId})`);
         
@@ -515,12 +563,13 @@ router.post('/prompt', async (req, res) => {
             existingContent,
             editorialAnalysis,
             nextContext,
-            project
+            project,
+            bookBrief
         );
 
         res.json({ prompt });
     } catch (error) {
-        console.error('Prompt preview error:', error);
+        console.error('Prompt preview error:', safeErrorForLog(error));
         res.status(500).json({ error: error.message });
     }
 });
@@ -545,7 +594,7 @@ router.put('/:id', async (req, res) => {
         await scene.save();
         res.json(scene);
     } catch (error) {
-        console.error("Failed to update scene:", error);
+        console.error("Failed to update scene:", safeErrorForLog(error));
         res.status(500).json({ error: 'Failed to update scene' });
     }
 });

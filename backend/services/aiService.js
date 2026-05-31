@@ -2,6 +2,12 @@ const fs = require('fs');
 const NarrativeStyle = require('../models/NarrativeStyle');
 const { CHAPTER_TYPES } = require('../config/constants');
 const textGenerationService = require('./textGenerationService');
+const { resolveBeatWordBudget } = require('./storyStructureService');
+const {
+    buildBookBriefPromptContext,
+    getBookBriefByProjectId
+} = require('./bookBriefService');
+const { safeErrorForLog } = require('../utils/safeLog');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -17,7 +23,7 @@ function countWords(text) {
 function findChapterTypeForBeat(beatId, bible) {
     if (!bible || !bible.chapters) return null;
     for (const chapter of bible.chapters) {
-        if (chapter.beats && chapter.beats.some(b => b.id === beatId)) {
+        if (chapter.beats && chapter.beats.some(b => String(b.id) === String(beatId))) {
             const typeKey = (chapter.type || 'NORMAL').toUpperCase();
             return CHAPTER_TYPES[typeKey] || null;
         }
@@ -260,14 +266,46 @@ async function analyzeStoryStructure(text, language = "Português Brasileiro", p
             project,
             prompt,
             schema: analysisSchema,
-            schemaName: 'story analysis'
+            schemaName: 'story analysis',
+            costMetadata: {
+                task: 'analyze_project',
+                stage: 'analysis',
+                requestType: 'text',
+                source: 'aiService.analyzeStoryStructure'
+            }
         });
         const rawJson = data;
-        console.log("AI Analysis Raw Result:", JSON.stringify(rawJson, null, 2));
+        console.log("[AI_ANALYSIS] completed", {
+            characterCount: rawJson.characters?.length || 0,
+            settingCount: rawJson.settings?.length || 0,
+            beatCount: rawJson.beats?.length || 0,
+            chapterCount: rawJson.chapters?.length || 0
+        });
         return rawJson;
     } catch (error) {
-        console.error("AI Analysis Error:", error);
+        console.error("AI Analysis Error:", safeErrorForLog(error));
         throw new Error("Failed to analyze story structure.");
+    }
+}
+
+async function resolveBookBriefForPrompt(project, bookBrief) {
+    if (bookBrief !== undefined) {
+        return bookBrief;
+    }
+
+    const projectId = project && (project._id || project.id);
+    if (!projectId) {
+        return null;
+    }
+
+    try {
+        return await getBookBriefByProjectId(projectId);
+    } catch (error) {
+        console.warn('[SCENE] BookBrief unavailable for prompt context', {
+            projectId: projectId?.toString?.() || projectId,
+            error: safeErrorForLog(error)
+        });
+        return null;
     }
 }
 
@@ -408,7 +446,13 @@ REQUIRED CHAPTER STRUCTURE — EXACTLY ${requiredCount} CHAPTERS:
             project,
             prompt,
             schema: bibleSchema,
-            schemaName: 'story bible'
+            schemaName: 'story bible',
+            costMetadata: {
+                task: 'generate_bible',
+                stage: 'outlining',
+                requestType: 'text',
+                source: 'aiService.generateStoryBible'
+            }
         });
         const rawJson = data;
 
@@ -441,11 +485,17 @@ REQUIRED CHAPTER STRUCTURE — EXACTLY ${requiredCount} CHAPTERS:
             }
         }
 
-        console.log("AI Bible Result — chapters:", rawJson.chapters?.length, "| short story:", isShortStory);
+        console.log("[AI_BIBLE] completed", {
+            chapterCount: rawJson.chapters?.length || 0,
+            topLevelBeatCount: rawJson.beats?.length || 0,
+            characterCount: rawJson.characters?.length || 0,
+            settingCount: rawJson.settings?.length || 0,
+            isShortStory
+        });
 
         return rawJson;
     } catch (error) {
-        console.error("AI Bible Generation Error:", error);
+        console.error("AI Bible Generation Error:", safeErrorForLog(error));
         throw new Error("Failed to generate story bible.");
     }
 }
@@ -471,10 +521,19 @@ async function generateSceneSummary(content, language = "Português Brasileiro",
     `;
 
     try {
-        const { text } = await textGenerationService.generateText({ project, prompt });
+        const { text } = await textGenerationService.generateText({
+            project,
+            prompt,
+            costMetadata: {
+                task: 'summarize_scene',
+                stage: 'revision',
+                requestType: 'text',
+                source: 'aiService.generateSceneSummary'
+            }
+        });
         return text;
     } catch (error) {
-        console.error("AI Scene Summary Error:", error);
+        console.error("AI Scene Summary Error:", safeErrorForLog(error));
         throw new Error("Failed to generate scene summary.");
     }
 }
@@ -491,11 +550,21 @@ async function generateSceneSummary(content, language = "Português Brasileiro",
  * @param {string} existingContent - Existing scene content (for revision).
  * @param {string} editorialAnalysis - Editorial analysis of the chapter.
  */
-async function buildScenePrompt(beat, bible, projectStyle, language = "Português Brasileiro", instructions = "", previousContext = "", projectCustomStyle = "", existingContent = "", editorialAnalysis = "", nextContext = "", project = null) {
+async function buildScenePrompt(beat, bible, projectStyle, language = "Português Brasileiro", instructions = "", previousContext = "", projectCustomStyle = "", existingContent = "", editorialAnalysis = "", nextContext = "", project = null, bookBrief = undefined) {
     const contextSection = previousContext ? `
     PREVIOUSLY IN THE STORY (Context from previous scenes):
     ${previousContext}
     ` : "";
+    const promptBookBrief = await resolveBookBriefForPrompt(project, bookBrief);
+    const bookBriefPromptContext = buildBookBriefPromptContext(promptBookBrief);
+    const bookBriefSection = bookBriefPromptContext ? `
+═══════════════════════════════════════════════════════════════
+${bookBriefPromptContext}
+═══════════════════════════════════════════════════════════════
+- Treat the editorial brief as guidance and constraints for language, positioning, tone, audience, and content boundaries.
+- Do not mention AI disclosure or human review status inside the story prose.
+- The Story Bible, current beat, chapter context, and continuity remain the primary sources for narrative events.
+` : "";
 
     // Short story framing — injected only when the project is a conto/short story
     const isShortStory = (project && project.isShortStory === true);
@@ -505,6 +574,23 @@ async function buildScenePrompt(beat, bible, projectStyle, language = "Portuguê
     const wordsPerBeat = (isShortStory && targetWordCount)
         ? Math.round(targetWordCount / totalBeatsForBudget)
         : null;
+    const chapterTypeConfig = !isShortStory ? findChapterTypeForBeat(beat.id, bible) : null;
+    const sceneWordBudget = !isShortStory
+        ? resolveBeatWordBudget({
+            bible,
+            beat,
+            chapterTypeConfig,
+            defaultWordCount: CHAPTER_TYPES.NORMAL.wordCount
+        })
+        : null;
+    const sceneWordBudgetBlock = !isShortStory && sceneWordBudget && (sceneWordBudget.min > 0 || sceneWordBudget.max > 0) ? `
+═══════════════════════════════════════════════════════════════
+SCENE WORD COUNT TARGET
+═══════════════════════════════════════════════════════════════
+- This target is for the CURRENT SCENE / BEAT, not for the whole chapter.
+- Write approximately ${sceneWordBudget.min}-${sceneWordBudget.max} words for this scene.
+- If this beat belongs to a chapter with multiple beats, the chapter budget has already been divided across those beats.
+` : "";
     const shortStoryBlock = isShortStory ? `
 ═══════════════════════════════════════════════════════════════
 SHORT STORY MODE — CONTINUOUS NARRATIVE
@@ -650,7 +736,9 @@ This is a CONTO / SHORT STORY, NOT a chapter in a novel.
 
     const prompt = `
     You are a best-selling novelist ${hasExistingContent ? 'REVISING' : 'writing'} a scene for a ${projectStyle} story.
+    ${bookBriefSection}
     ${shortStoryBlock}
+    ${sceneWordBudgetBlock}
     STYLE INSTRUCTIONS: ${sceneInstruction}${craftGuidelines}${innerLifeSection}${narrativeArcSection}
     
     ${chapterContext}
@@ -729,14 +817,24 @@ This is a CONTO / SHORT STORY, NOT a chapter in a novel.
  * @param {string} editorialAnalysis - Editorial analysis of the chapter.
  * @returns {Promise<string>} - The generated scene content.
  */
-async function generateScene(beat, bible, projectStyle, language = "Português Brasileiro", instructions = "", previousContext = "", projectCustomStyle = "", existingContent = "", editorialAnalysis = "", nextContext = "", project = null) {
+async function generateScene(beat, bible, projectStyle, language = "Português Brasileiro", instructions = "", previousContext = "", projectCustomStyle = "", existingContent = "", editorialAnalysis = "", nextContext = "", project = null, bookBrief = undefined) {
     // Build the prompt using the helper so both generation and preview can reuse it
     // Note: bible may include project-level data in bible.style_notes; if caller passes projectCustomStyle, include it.
     const customStyle = projectCustomStyle || bible.customStyle || "";
-    const prompt = await buildScenePrompt(beat, bible, projectStyle, language, instructions, previousContext, customStyle, existingContent, editorialAnalysis, nextContext, project);
+    const prompt = await buildScenePrompt(beat, bible, projectStyle, language, instructions, previousContext, customStyle, existingContent, editorialAnalysis, nextContext, project, bookBrief);
 
     try {
-        const { text } = await textGenerationService.generateText({ project, prompt });
+        const { text } = await textGenerationService.generateText({
+            project,
+            prompt,
+            costMetadata: {
+                task: 'generate_scene',
+                stage: 'drafting',
+                requestType: 'text',
+                source: 'aiService.generateScene',
+                beatId: beat?.id
+            }
+        });
 
         // ── Word count enforcement ──────────────────────────────────────────
         const isShortStoryProject = project && project.isShortStory === true;
@@ -756,29 +854,55 @@ async function generateScene(beat, bible, projectStyle, language = "Português B
                 console.warn(`[SCENE] Short story beat ${beat.id}: ${wordCount} words generated, target ~${perBeatTarget}. Requesting continuation (~${deficit} words).`);
                 const continuationPrompt = `Continue a cena a seguir sem repetir o que já foi escrito. Adicione aproximadamente ${deficit} palavras que fluam naturalmente do final do texto. Escreva em ${language}. Não adicione comentários ou explicações — apenas o texto narrativo.\n\nFIM DA CENA ATÉ AGORA:\n${text}`;
                 try {
-                    const { text: continuation } = await textGenerationService.generateText({ project, prompt: continuationPrompt });
+                    const { text: continuation } = await textGenerationService.generateText({
+                        project,
+                        prompt: continuationPrompt,
+                        costMetadata: {
+                            task: 'generate_scene',
+                            stage: 'drafting',
+                            requestType: 'text',
+                            source: 'aiService.generateScene.continuation',
+                            beatId: beat?.id
+                        }
+                    });
                     console.log(`[SCENE] Short story beat ${beat.id}: continuation added ${countWords(continuation)} words.`);
                     return text + '\n\n' + continuation;
                 } catch (contErr) {
-                    console.warn(`[SCENE] Short story beat ${beat.id}: continuation failed — returning original. Error: ${contErr.message}`);
+                    console.warn(`[SCENE] Short story beat ${beat.id}: continuation failed — returning original.`, safeErrorForLog(contErr));
                 }
             }
         } else {
-            // Multi-chapter novel: use chapter type word count minimums
+            // Multi-chapter novel: enforce the per-beat share of the chapter type budget.
             const chapterTypeConfig = findChapterTypeForBeat(beat.id, bible);
-            if (chapterTypeConfig) {
+            const sceneWordBudget = resolveBeatWordBudget({
+                bible,
+                beat,
+                chapterTypeConfig,
+                defaultWordCount: CHAPTER_TYPES.NORMAL.wordCount
+            });
+            if (sceneWordBudget.min > 0) {
                 const wordCount = countWords(text);
-                const minTarget = chapterTypeConfig.wordCount.min;
+                const minTarget = sceneWordBudget.min;
                 if (wordCount < minTarget * 0.8) {
                     const deficit = Math.round(minTarget - wordCount);
-                    console.warn(`[SCENE] Beat ${beat.id}: ${wordCount} words generated, target min=${minTarget}. Requesting continuation (~${deficit} words).`);
+                    console.warn(`[SCENE] Beat ${beat.id}: ${wordCount} words generated, scene target min=${minTarget}. Requesting continuation (~${deficit} words).`);
                     const continuationPrompt = `Continue a cena a seguir sem repetir o que já foi escrito. Adicione aproximadamente ${deficit} palavras que fluam naturalmente do final do texto. Escreva em ${language}. Não adicione comentários ou explicações — apenas o texto narrativo.\n\nFIM DA CENA ATÉ AGORA:\n${text}`;
                     try {
-                        const { text: continuation } = await textGenerationService.generateText({ project, prompt: continuationPrompt });
+                        const { text: continuation } = await textGenerationService.generateText({
+                            project,
+                            prompt: continuationPrompt,
+                            costMetadata: {
+                                task: 'generate_scene',
+                                stage: 'drafting',
+                                requestType: 'text',
+                                source: 'aiService.generateScene.continuation',
+                                beatId: beat?.id
+                            }
+                        });
                         console.log(`[SCENE] Beat ${beat.id}: continuation added ${countWords(continuation)} words.`);
                         return text + '\n\n' + continuation;
                     } catch (contErr) {
-                        console.warn(`[SCENE] Beat ${beat.id}: continuation failed — returning original. Error: ${contErr.message}`);
+                        console.warn(`[SCENE] Beat ${beat.id}: continuation failed — returning original.`, safeErrorForLog(contErr));
                     }
                 }
             }
@@ -787,7 +911,7 @@ async function generateScene(beat, bible, projectStyle, language = "Português B
 
         return text;
     } catch (error) {
-        console.error("AI Scene Generation Error:", error);
+        console.error("AI Scene Generation Error:", safeErrorForLog(error));
         throw new Error("Failed to generate scene.");
     }
 }
@@ -842,11 +966,17 @@ async function generateCharacterBackground(character, storyText, projectStyle, u
             project,
             prompt,
             schema: characterBackgroundSchema,
-            schemaName: 'character background'
+            schemaName: 'character background',
+            costMetadata: {
+                task: 'generate_bible',
+                stage: 'outlining',
+                requestType: 'text',
+                source: 'aiService.generateCharacterBackground'
+            }
         });
         return data;
     } catch (error) {
-        console.error("AI Character Background Error:", error);
+        console.error("AI Character Background Error:", safeErrorForLog(error));
         throw new Error("Failed to generate character background.");
     }
 }
@@ -899,11 +1029,17 @@ async function generateLocationBackground(location, storyText, projectStyle, use
             project,
             prompt,
             schema: locationBackgroundSchema,
-            schemaName: 'location background'
+            schemaName: 'location background',
+            costMetadata: {
+                task: 'generate_bible',
+                stage: 'outlining',
+                requestType: 'text',
+                source: 'aiService.generateLocationBackground'
+            }
         });
         return data;
     } catch (error) {
-        console.error("AI Location Background Error:", error);
+        console.error("AI Location Background Error:", safeErrorForLog(error));
         throw new Error("Failed to generate location background.");
     }
 }
@@ -970,11 +1106,18 @@ async function generateBeatDetails(beat, storyText, projectStyle, userPrompt, pr
             project,
             prompt,
             schema: beatBackgroundSchema,
-            schemaName: 'beat details'
+            schemaName: 'beat details',
+            costMetadata: {
+                task: 'generate_bible',
+                stage: 'outlining',
+                requestType: 'text',
+                source: 'aiService.generateBeatDetails',
+                beatId: beat?.id
+            }
         });
         return data;
     } catch (error) {
-        console.error("AI Beat Details Error:", error);
+        console.error("AI Beat Details Error:", safeErrorForLog(error));
         throw new Error("Failed to generate beat details.");
     }
 }
@@ -1093,16 +1236,18 @@ Responda em ${language} de forma detalhada e construtiva. Use markdown para form
                 temperature: 0.7,
                 topP: 0.9,
                 topK: 40
+            },
+            costMetadata: {
+                task: 'analyze_project',
+                stage: 'analysis',
+                requestType: 'text',
+                source: 'aiService.analyzeChapter',
+                chapterNumber: chapterData?.chapterNumber
             }
         });
         return text;
     } catch (error) {
-        console.error("AI Chapter Analysis Error:", error);
-        console.error("Error details:", error.message);
-        if (error.response) {
-            console.error("Response status:", error.response.status);
-            console.error("Response data:", error.response.data);
-        }
+        console.error("AI Chapter Analysis Error:", safeErrorForLog(error));
         throw new Error(`Failed to analyze chapter: ${error.message}`);
     }
 }
